@@ -1,0 +1,7 @@
+# Dev overlay for the lesson-log verification harness (channel ①):
+#   dsh web --patch ./plugins/learn-dsh/test/log-harness.cordis.yml --no-open
+- insert:
+    - id: learn-dsh
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn/plugins/learn-dsh/lib/index.js
+    - id: learn-dsh-log-harness
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn/plugins/learn-dsh/test/log-harness.ts

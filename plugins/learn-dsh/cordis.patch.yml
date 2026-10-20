@@ -1,0 +1,5 @@
+# learn-dsh bundle layer, applied when a profile lists this bundle.
+- insert:
+    # Host half: quiz tool (tools + userQuestions services).
+    - id: learn-dsh
+      name: learn-dsh

@@ -1,10 +1,12 @@
 # 依赖
 node_modules/
 vendor/
+.pnpm-store/
 
 # 构建产物
 dist/
 build/
+plugins/learn-dsh/lib/
 
 # 日志
 *.log
@@ -23,3 +25,13 @@ Thumbs.db
 
 # 临时文件
 tmp/*
+
+# DSH 参考提取（app.asar 解包副本，约 100MB，不入库）
+tmp-dsh-extract/
+
+# 迁移期临时产物（重定向 DSH home、mermaid 本地安装、npm 缓存、maker 工作区）
+.tmp-dsh-home/
+.tmp-mermaid/
+.tmp-npm-cache/
+.viz-work/
+.mmdc-smoke.*
