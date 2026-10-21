@@ -1,0 +1,9 @@
+# Dev overlay for the quiz verification harness (channel ①):
+#   dsh web --patch ./test/quiz-harness.cordis.yml --no-open
+# Boots the web profile with dsh-learn-plugin (built lib) + the harness, which prints
+# a PASS/FAIL report to stdout. Paths must stay absolute.
+- insert:
+    - id: dsh-learn-plugin
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dist/lib/index.js
+    - id: dsh-learn-plugin-quiz-harness
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/test/quiz-harness.ts

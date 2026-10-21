@@ -66,7 +66,7 @@ function assistantBlock(text: string): string {
 }
 
 function questionCallout(label: string, question: string, options: Array<{ label: string }>): string {
-  const body: string[] = [...question.split('\n')]
+  const body: string[] = question.split('\n')
   if (options.length > 0) {
     body.push('')
     body.push(...options.map((option, index) => `${index + 1}. ${option.label}`))

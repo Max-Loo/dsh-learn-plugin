@@ -1,7 +1,0 @@
-# Dev overlay for the bundled-skills verification harness:
-#   DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/skills-harness.cordis.yml --no-open --port 0
-- insert:
-    - id: dsh-learn-plugin
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/lib/index.js
-    - id: dsh-learn-plugin-skills-harness
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/test/skills-harness.ts

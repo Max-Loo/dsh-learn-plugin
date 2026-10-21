@@ -29,8 +29,8 @@ export const inject = ['skills']
 
 const PROVIDER_NAME = 'dsh-learn-plugin'
 
-/** Package-root `skills/` directory, resolved from this compiled module (`lib/`). */
-const SKILLS_ROOT = fileURLToPath(new URL('../skills/', import.meta.url))
+/** Package-root `skills/` directory, resolved from this compiled module (`dist/lib/`). */
+const SKILLS_ROOT = fileURLToPath(new URL('../../skills/', import.meta.url))
 
 interface ParsedSkill {
   name: string

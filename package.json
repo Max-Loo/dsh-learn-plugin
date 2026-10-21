@@ -1,20 +1,20 @@
 {
   "name": "dsh-learn-plugin",
   "version": "0.1.0",
-  "description": "Graded quiz and lesson-log plugins for DeepSeek Harness, migrated from the pi-based learn system",
+  "description": "Graded quiz and lesson-log plugins for DeepSeek Harness",
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "main": "dist/lib/index.js",
+  "types": "dist/lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/index.d.ts",
-      "default": "./lib/index.js"
+      "types": "./dist/lib/index.d.ts",
+      "default": "./dist/lib/index.js"
     },
     "./client": "./client/index.js",
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "dist/lib",
     "client",
     "skills",
     "cordis.patch.yml",
@@ -22,6 +22,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "pack": "pnpm run build && pnpm pack --pack-destination dist",
     "prepare": "pnpm run build"
   },
   "engines": {

@@ -6,7 +6,6 @@ vendor/
 # 构建产物
 dist/
 build/
-dsh-learn-plugin/lib/
 
 # 日志
 *.log

@@ -5,7 +5,7 @@
 # profile directory. Replace the path below when working from another
 # checkout, then boot with:
 #
-#   dsh web --patch ./dsh-learn-plugin/cordis.dev.yml
+#   dsh web --patch ./cordis.dev.yml
 #
 # (from a deepseek-harness source checkout: `pnpm dsh web --patch ...`)
 #
@@ -14,4 +14,4 @@
 # sibling imports back to `.ts`.
 - insert:
     - id: dsh-learn-plugin
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/lib/index.js
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dist/lib/index.js
