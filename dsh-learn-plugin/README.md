@@ -2,7 +2,8 @@
 
 DSH port of the pi-based [`learn`](https://github.com/amosblomqvist/learn) study
 system: graded quiz tool + lesson-log mirroring, plus the `teach` / `visualize`
-skills that drive them (skills live in the repository's `.dsh/skills/`).
+skills that drive them (bundled in this package under `skills/` and registered
+on the DSH skill registry).
 
 Status: complete (quiz + lesson-log + client slots). Installation, render
 dependencies, degradation notes and rollback are documented in

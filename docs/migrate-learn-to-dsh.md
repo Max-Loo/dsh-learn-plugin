@@ -8,8 +8,8 @@
 
 | 组件 | 位置 | 说明 |
 |---|---|---|
-| teach 教学技能 | `.dsh/skills/teach/` | probe→plan→teach 三阶段教学流程；引用 `references/researcher.md` 调研子代理提示词 |
-| visualize 图示技能 | `.dsh/skills/visualize/` | 按需委派 maker 子代理；`references/mermaid-maker.md`、`references/svg-maker.md` 为子代理提示词模板 |
+| teach 教学技能 | `dsh-learn-plugin/skills/teach/`（随插件包分发） | probe→plan→teach 三阶段教学流程；引用 `references/researcher.md` 调研子代理提示词 |
+| visualize 图示技能 | `dsh-learn-plugin/skills/visualize/`（随插件包分发） | 按需委派 maker 子代理；`references/mermaid-maker.md`、`references/svg-maker.md` 为子代理提示词模板 |
 | quiz 评分问答 | `dsh-learn-plugin/`（进程内插件） | `ctx.tools.register` + `ctx.userQuestions.ask()`；纯展示投影防答案泄漏 |
 | lesson-log 课程日志 | `dsh-learn-plugin/`（同插件） | 订阅 `session/event` 流镜像 Obsidian callout；`lesson_log`/`lesson_unlog` 工具 + `/lesson-log`、`/lesson-unlog` 用户命令 |
 
@@ -23,9 +23,12 @@
 - Node ≥ 24 与 pnpm（构建插件用）。
 - 渲染链（可选，见下节）。
 
-### 2. 安装项目级 skills（teach / visualize）
+### 2. skills（teach / visualize）—— 随插件内置，安装即得
 
-skills 是项目级约定，随仓库走：把 `.dsh/skills/teach/` 与 `.dsh/skills/visualize/` 放进目标项目仓库即可，DSH 会自动加载并在技能列表中显示。
+无需任何项目级文件：`teach` / `visualize` 已内置于 `dsh-learn-plugin` 包（`skills/` 目录随发布包分发，经 `ctx.skills` 技能注册表注册），安装插件（下一节）并重启 DSH 后，两个技能自动出现在会话技能目录中，对模型与用户两面均可调用（`/teach`、`/visualize` 可直接加载正文）。
+
+- 正文中的 `references/` 提示词模板按各自技能在已安装插件包内的资源基址解析，在任何装了插件的项目里都可读取，不依赖目标项目或用户目录中存在对应文件。
+- **项目级覆盖**：想定制就在目标项目放同名技能 `.dsh/skills/teach/`（或 `visualize/`）——项目级技能 rank（100）优先于内置副本 rank（600），加载的即是项目副本；删除项目级副本后，会话刷新技能目录即自动回落到内置副本，无需重装插件。
 
 ### 3. 安装插件（quiz + lesson-log）
 
@@ -80,6 +83,9 @@ DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/quiz-harne
 
 # lesson-log 行为（回填、保序、题面先于答案、命令路径、解除）：应 16/16 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/log-harness.cordis.yml --no-open --port 0
+
+# 内置技能分发（目录字段、剥 frontmatter 正文、references 资源基址）：应 22/22 PASS
+DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/skills-harness.cordis.yml --no-open --port 0
 ```
 
 重启恢复镜像用 `test/restore-probe.ts` 两阶段探针验证（A 链接并退出；B 冷启动进程追加事件，断言恢复注记与新事件镜像）。端到端教学演练对照 `specs/` 各 Scenario 手工执行。
@@ -89,5 +95,5 @@ DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/log-harnes
 ## 回滚方式
 
 - 卸载插件：`dsh plugin --profile desktop remove link:./dsh-learn-plugin`（或 `pnpm remove`）并重启 DSH —— quiz 与 lesson-log 同时下线。
-- 移除技能：删除 `.dsh/skills/teach/` 与 `.dsh/skills/visualize/`。
+- 移除技能：随插件卸载一并下线（teach / visualize 内置于包内）；若只想换掉某个技能，放项目级同名 `.dsh/skills/<name>/` 覆盖即可，不必卸载。
 - 删除已发布的图示：清理 `viz/`；课程日志为普通 markdown，直接编辑或删除文件即可，卸载不影响既有日志。

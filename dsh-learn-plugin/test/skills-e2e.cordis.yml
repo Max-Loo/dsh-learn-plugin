@@ -1,0 +1,9 @@
+# E2E observer overlay for bundled-skills (change: bundle-plugin-skills, task 5.1).
+# Unlike skills-harness.cordis.yml this inserts ONLY the observer harness: the
+# plugin under test must come from the booted profile's own `dsh-learn-plugin`
+# link, not from a workspace path insert. Run from a project WITHOUT .dsh/skills:
+#   DSH_HOME=<isolated home with the desktop profile copy> dsh web --profile desktop \
+#     --patch ./dsh-learn-plugin/test/skills-e2e.cordis.yml --no-open --port 0
+- insert:
+    - id: dsh-learn-plugin-skills-harness
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/test/skills-harness.ts
