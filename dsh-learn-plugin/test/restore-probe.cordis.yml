@@ -1,0 +1,12 @@
+# Dev overlay for the two-phase restart-restore probe (channel ①):
+#   Phase A: DSH_HOME=<home> RESTORE_PHASE=A dsh web --patch ./dsh-learn-plugin/test/restore-probe.cordis.yml --no-open --port 0
+#   Phase B (NEW process, after killing A): DSH_HOME=<home> RESTORE_PHASE=B dsh web --patch <same> --no-open --port 0
+# Phase A links a fixture file (DSH_HOME/restore-fixture/lesson.md) and exits;
+# phase B cold-starts the plugin, must restore the link from the durable
+# storage table (restore note) and mirror a new event. Both phases must run
+# with the same process cwd (session storage is keyed by meta.cwd).
+- insert:
+    - id: dsh-learn-plugin
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/lib/index.js
+    - id: dsh-learn-plugin-restore-probe
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/test/restore-probe.ts

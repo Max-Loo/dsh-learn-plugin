@@ -10,8 +10,8 @@
 |---|---|---|
 | teach 教学技能 | `.dsh/skills/teach/` | probe→plan→teach 三阶段教学流程；引用 `references/researcher.md` 调研子代理提示词 |
 | visualize 图示技能 | `.dsh/skills/visualize/` | 按需委派 maker 子代理；`references/mermaid-maker.md`、`references/svg-maker.md` 为子代理提示词模板 |
-| quiz 评分问答 | `plugins/learn-dsh/`（进程内插件） | `ctx.tools.register` + `ctx.userQuestions.ask()`；纯展示投影防答案泄漏 |
-| lesson-log 课程日志 | `plugins/learn-dsh/`（同插件） | 订阅 `session/event` 流镜像 Obsidian callout；`lesson_log`/`lesson_unlog` 工具 + `/lesson-log`、`/lesson-unlog` 用户命令 |
+| quiz 评分问答 | `dsh-learn-plugin/`（进程内插件） | `ctx.tools.register` + `ctx.userQuestions.ask()`；纯展示投影防答案泄漏 |
+| lesson-log 课程日志 | `dsh-learn-plugin/`（同插件） | 订阅 `session/event` 流镜像 Obsidian callout；`lesson_log`/`lesson_unlog` 工具 + `/lesson-log`、`/lesson-unlog` 用户命令 |
 
 `tmp/learn/` 仅作只读参考源，`tmp-dsh-extract/`（asar 提取副本）仅作 API 核对参考，均不入库。
 
@@ -30,14 +30,14 @@ skills 是项目级约定，随仓库走：把 `.dsh/skills/teach/` 与 `.dsh/sk
 ### 3. 安装插件（quiz + lesson-log）
 
 ```sh
-cd plugins/learn-dsh
+cd dsh-learn-plugin
 pnpm install          # 安装对等依赖（zod + @deepseek-ai/*）
 pnpm run build        # tsc 编译到 lib/
 cd ../..
-dsh plugin --profile desktop add link:./plugins/learn-dsh
+dsh plugin --profile desktop add link:./dsh-learn-plugin
 ```
 
-重启 DSH 后启动日志出现 `[learn-dsh] plugin loaded` 即成功。会话内验证：
+重启 DSH 后启动日志出现 `[dsh-learn-plugin] plugin loaded` 即成功。会话内验证：
 
 - `quiz` 工具出现在模型工具列表（主会话出题、作答、即时反馈）。
 - `/lesson-log <已有 markdown 文件>` 链接课程日志，`/lesson-unlog` 解除。
@@ -47,10 +47,10 @@ dsh plugin --profile desktop add link:./plugins/learn-dsh
 从 DSH 源码检出版本运行时，可用 patch 覆盖层直接插入本地插件模块（改完即时生效）：
 
 ```sh
-dsh web --patch ./plugins/learn-dsh/cordis.dev.yml
+dsh web --patch ./dsh-learn-plugin/cordis.dev.yml
 ```
 
-注：插件 peerDependencies 锁 `0.2.1-rc.2`；在更早的 dsh 运行时上会被禁用，需 `dsh plugin allow-version "learn-dsh@<ver>" --dsh-version <runtime> --accept-risk --profile <profile>` 显式豁免。
+注：插件 peerDependencies 锁 `0.2.1-rc.2`；在更早的 dsh 运行时上会被禁用，需 `dsh plugin allow-version "dsh-learn-plugin@<ver>" --dsh-version <runtime> --accept-risk --profile <profile>` 显式豁免。
 
 ## 渲染依赖（lesson-visuals）
 
@@ -76,16 +76,18 @@ dsh web --patch ./plugins/learn-dsh/cordis.dev.yml
 
 ```sh
 # quiz 行为（校验、乱序、IDK、多选、防泄漏、子代理拒绝）：应 22/22 PASS
-DSH_HOME=<workspace dsh home> dsh web --patch ./plugins/learn-dsh/test/quiz-harness.cordis.yml --no-open --port 0
+DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/quiz-harness.cordis.yml --no-open --port 0
 
 # lesson-log 行为（回填、保序、题面先于答案、命令路径、解除）：应 16/16 PASS
-DSH_HOME=<workspace dsh home> dsh web --patch ./plugins/learn-dsh/test/log-harness.cordis.yml --no-open --port 0
+DSH_HOME=<workspace dsh home> dsh web --patch ./dsh-learn-plugin/test/log-harness.cordis.yml --no-open --port 0
 ```
 
 重启恢复镜像用 `test/restore-probe.ts` 两阶段探针验证（A 链接并退出；B 冷启动进程追加事件，断言恢复注记与新事件镜像）。端到端教学演练对照 `specs/` 各 Scenario 手工执行。
 
+> **注**：以上 overlay（`cordis.dev.yml` 与 `test/*.cordis.yml`）均以**绝对路径**插入插件模块——更换检出位置或在其他机器上复跑时，需把 yml 中的 `name:` 路径同步替换为当前仓库位置（本仓库更名自 `personal/dsh-learn/`，路径曾因此失配过一次）。
+
 ## 回滚方式
 
-- 卸载插件：`dsh plugin --profile desktop remove link:./plugins/learn-dsh`（或 `pnpm remove`）并重启 DSH —— quiz 与 lesson-log 同时下线。
+- 卸载插件：`dsh plugin --profile desktop remove link:./dsh-learn-plugin`（或 `pnpm remove`）并重启 DSH —— quiz 与 lesson-log 同时下线。
 - 移除技能：删除 `.dsh/skills/teach/` 与 `.dsh/skills/visualize/`。
 - 删除已发布的图示：清理 `viz/`；课程日志为普通 markdown，直接编辑或删除文件即可，卸载不影响既有日志。

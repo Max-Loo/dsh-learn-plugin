@@ -13,10 +13,10 @@ The goal is never "he can recite the fact." The goal is **understanding**: the f
 
 The tools this skill uses and their DSH specifics:
 
-- **`quiz`** — graded-question tool provided by the `learn-dsh` plugin (see below for authoring rules). Works only in the main session: a subagent cannot open the human interaction, so never dispatch `quiz` from a subagent — brief it to return the question instead.
+- **`quiz`** — graded-question tool provided by the `dsh-learn-plugin` plugin (see below for authoring rules). Works only in the main session: a subagent cannot open the human interaction, so never dispatch `quiz` from a subagent — brief it to return the question instead.
 - **`ask_user_question`** — built-in DSH tool for genuine no-right-answer questions.
 - **researcher** — no named agent registry exists in DSH. Dispatch via the `subagent` tool with the prompt template at `references/researcher.md` (relative to this skill's directory): read the template, append your research question, pass it as the `prompt` argument with a short `description`.
-- **Lesson log** — the `learn-dsh` plugin mirrors the session into a linked markdown file (see "Link a lesson log" below).
+- **Lesson log** — the `dsh-learn-plugin` plugin mirrors the session into a linked markdown file (see "Link a lesson log" below).
 - **Rendering** — the DSH Web GUI renders LaTeX math (`$…$` inline, `$$…$$` display, via KaTeX) and standard markdown images. It does **not** render ```mermaid``` blocks as diagrams — for any diagram, dispatch the mermaid maker as described in the `visualize` skill and embed the returned PNG.
 
 ## The philosophy (why this works — internalize it)

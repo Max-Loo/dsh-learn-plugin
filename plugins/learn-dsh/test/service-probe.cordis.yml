@@ -1,7 +1,0 @@
-# Dev overlay for the service probe:
-#   dsh web --patch ./plugins/learn-dsh/test/service-probe.cordis.yml --no-open
-- insert:
-    - id: learn-dsh
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn/plugins/learn-dsh/lib/index.js
-    - id: learn-dsh-service-probe
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn/plugins/learn-dsh/test/service-probe.ts

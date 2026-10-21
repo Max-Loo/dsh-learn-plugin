@@ -1,0 +1,27 @@
+# Overlay for headless quiz/subagent verification: dsh-learn-plugin + zhipu provider
+# + default model pointing at it (the headless profile has no user LLM config).
+- insert:
+    - id: dsh-learn-plugin
+      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dsh-learn-plugin/lib/index.js
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      zhipu-ai-coding-plan:
+        apiKeyEnv: ZHIPU_AI_CODING_PLAN_API_KEY
+        api: openai-completions
+        baseURL: https://open.bigmodel.cn/api/coding/paas/v4
+        models:
+          - id: glm-5.3
+            name: glm-5.3
+            contextWindow: 1000000
+            maxTokens: 128000
+          - id: glm-5.3-flash
+            name: glm-5.3-flash
+            contextWindow: 1000000
+            maxTokens: 128000
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: zhipu-ai-coding-plan
+    model: glm-5.3
