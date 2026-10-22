@@ -23,7 +23,7 @@ build/
 Thumbs.db
 
 # 临时文件
-tmp/*
+tmp/
 
 # DSH 参考提取（app.asar 解包副本，约 100MB，不入库）
 tmp-dsh-extract/

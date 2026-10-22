@@ -1,73 +1,47 @@
 # dsh-learn-plugin
 
-## 项目概述
+运行在 DeepSeek Harness (DSH) 上的个人学习系统：评分问答（quiz）工具 + 课程日志（lesson-log）插件，以及驱动它们的 `teach` / `visualize` 技能（内置于包内 `skills/` 目录，安装后经 DSH 技能注册表自动注册）。受 [`learn`](https://github.com/amosblomqvist/learn)（构建在 pi 编码代理上的个人学习系统）启发。
 
-本项目是运行在 DeepSeek Harness (DSH) 上的个人学习系统，受 [`learn`](https://github.com/amosblomqvist/learn)（构建在 pi 编码代理上的个人学习系统）启发：评分问答（quiz）工具 + 课程日志镜像插件，以及驱动它们的 `teach` / `visualize` 技能（内置于包内 `skills/` 目录，经 DSH 技能注册表注册）。仓库根即包根——本 README 同时是仓库文档与 npm 包文档。
+## 功能总览
 
 | 组件 | 位置 | 说明 |
 |---|---|---|
-| teach 教学技能 | `skills/teach/`（随插件包分发） | probe→plan→teach 三阶段教学流程；引用 `references/researcher.md` 调研子代理提示词 |
-| visualize 图示技能 | `skills/visualize/`（随插件包分发） | 按需委派 maker 子代理；`references/mermaid-maker.md`、`references/svg-maker.md` 为子代理提示词模板 |
-| quiz 评分问答 | `src/`（进程内插件） | `ctx.tools.register` + `ctx.userQuestions.ask()`；纯展示投影防答案泄漏 |
-| lesson-log 课程日志 | `src/`（同插件） | 订阅 `session/event` 流镜像 Obsidian callout；`lesson_log`/`lesson_unlog` 工具 + `/lesson-log`、`/lesson-unlog` 用户命令 |
+| teach 教学技能 | `skills/teach/`（随包分发） | probe→plan→teach 三阶段教学流程；引用 `references/researcher.md` 调研子代理提示词 |
+| visualize 图示技能 | `skills/visualize/`（随包分发） | 按需委派 maker 子代理；`references/mermaid-maker.md`、`references/svg-maker.md` 为子代理提示词模板 |
+| quiz 评分问答 | 进程内插件 | `ctx.tools.register` + `ctx.userQuestions.ask()`；纯展示投影防答案泄漏 |
+| lesson-log 课程日志 | 进程内插件 | 订阅 `session/event` 流镜像 Obsidian callout；`lesson_log`/`lesson_unlog` 工具 + `/lesson-log`、`/lesson-unlog` 用户命令 |
 
-`tmp/learn/` 仅作只读参考源，`tmp-dsh-extract/`（asar 提取副本）仅作 API 核对参考，均不入库（见 `.gitignore`）。
-
-## 项目功能介绍
-
-五个能力的行为契约（requirement 与 scenario）见 [`openspec/specs/`](openspec/specs/)，此处只作导览：
-
-- **teaching** —— [`openspec/specs/teaching/spec.md`](openspec/specs/teaching/spec.md)：`teach` 技能的 probe→plan→teach 三阶段教学流程；researcher 调研子代理随会话模型执行，工具范围由提示词模板约束。
-- **graded-quiz** —— [`openspec/specs/graded-quiz/spec.md`](openspec/specs/graded-quiz/spec.md)：quiz 评分问答工具；选项校验、乱序、IDK、多选判分、防答案泄漏、子代理拒绝出题。
-- **lesson-log** —— [`openspec/specs/lesson-log/spec.md`](openspec/specs/lesson-log/spec.md)：课程日志镜像 Obsidian callout；回填、保序、题面先于答案、命令路径、解除链接。
-- **lesson-visuals** —— [`openspec/specs/lesson-visuals/spec.md`](openspec/specs/lesson-visuals/spec.md)：`visualize` 技能委派 maker 子代理（mermaid / SVG）本地渲染 PNG 并验证后发布；maker 随会话模型执行，工具范围由提示词模板约束。
-- **bundled-skills** —— [`openspec/specs/bundled-skills/spec.md`](openspec/specs/bundled-skills/spec.md)：技能随插件包分发与注册（目录字段、剥 frontmatter 正文、`references/` 资源基址），支持项目级同名覆盖。
-
-## 使用说明
-
-### 前置条件
+## 前置条件
 
 - DSH 桌面版（针对 `engines.dsh: "0.2.x"`，在 0.2.1-rc.2 上验证）。
-- Node ≥ 24 与 pnpm（构建插件用）。
-- 渲染链（可选，见[渲染依赖](#渲染依赖lesson-visuals)）。
 
 > 插件 peerDependencies 锁 `0.2.1-rc.2`；在更早的 dsh 运行时上会被禁用，需 `dsh plugin allow-version "dsh-learn-plugin@<ver>" --dsh-version <runtime> --accept-risk --profile <profile>` 显式豁免。
 
-### 内置 skills（teach / visualize）—— 安装即得
+## 安装
 
-无需任何项目级文件：`teach` / `visualize` 已内置于本包（`skills/` 目录随发布包分发，经 `ctx.skills` 技能注册表注册），安装插件（下一节）并重启 DSH 后，两个技能自动出现在会话技能目录中，对模型与用户两面均可调用（`/teach`、`/visualize` 可直接加载正文）。
+```sh
+dsh plugin --profile desktop add dsh-learn-plugin
+```
+
+重启 DSH，启动日志出现 `[dsh-learn-plugin] plugin loaded` 即成功。从源码安装（开发迭代）的方式见 [DEVELOPMENT.md](https://github.com/Max-Loo/dsh-learn-plugin/blob/main/DEVELOPMENT.md)。
+
+## 使用
+
+### 内置技能（teach / visualize）—— 安装即得
+
+无需任何项目级文件：`teach` / `visualize` 已内置于本包（`skills/` 目录随发布包分发，经 `ctx.skills` 技能注册表注册），安装插件并重启 DSH 后，两个技能自动出现在会话技能目录中，对模型与用户两面均可调用（`/teach`、`/visualize` 可直接加载正文）。
 
 - 正文中的 `references/` 提示词模板按各自技能在已安装插件包内的资源基址解析，在任何装了插件的项目里都可读取，不依赖目标项目或用户目录中存在对应文件。
 - **项目级覆盖**：想定制就在目标项目放同名技能 `.dsh/skills/teach/`（或 `visualize/`）——项目级技能 rank（100）优先于内置副本 rank（600），加载的即是项目副本；删除项目级副本后，会话刷新技能目录即自动回落到内置副本，无需重装插件。
 
-### 安装
+### quiz 评分问答
 
-两种加载通道，命令均在仓库根目录执行（仓库根即包根）：
+`quiz` 工具随插件出现在模型工具列表：主会话出题、作答、即时反馈。支持选项校验、乱序、IDK、多选判分；纯展示投影防答案泄漏，子代理拒绝出题。
 
-#### 1. 安装进 profile（常规使用）
+### lesson-log 课程日志
 
-```sh
-pnpm install          # 安装依赖（zod + @deepseek-ai/*；可选含内嵌 mermaid 渲染器 ~400MB，见[渲染依赖](#渲染依赖lesson-visuals)）
-pnpm run build        # tsc 编译到 dist/lib/
-dsh plugin --profile desktop add link:.
-```
-
-重启 DSH 后启动日志出现 `[dsh-learn-plugin] plugin loaded` 即成功。会话内验证：
-
-- `quiz` 工具出现在模型工具列表（主会话出题、作答、即时反馈）。
 - `/lesson-log <已有 markdown 文件>` 链接课程日志，`/lesson-unlog` 解除。
-
-注：link 方式安装的检出保留自己的 `node_modules` / 构建产物，改动源码后需在仓库根重新 `pnpm run build`。
-
-#### 2. 覆盖层（免安装，开发期实时加载）
-
-从 DSH 源码检出版本运行时，可用 patch 覆盖层直接插入本地插件模块（改完即时生效）：
-
-```sh
-dsh web --patch ./cordis.dev.yml
-```
-
-注意 `cordis.dev.yml` 以**绝对路径**插入插件模块——更换检出位置或在其他机器上使用时，需同步替换 yml 中的 `name:` 路径。
+- 订阅 `session/event` 流，把教学事件镜像为 Obsidian callout；支持回填、保序、题面先于答案。
 
 ### 渲染依赖（lesson-visuals）
 
@@ -75,17 +49,22 @@ dsh web --patch ./cordis.dev.yml
 
 #### mermaid 链（结构 / 关系 / 流程图）
 
-**默认供给（vendored）**：插件以 `optionalDependencies` 内嵌 `@mermaid-js/mermaid-cli@^12`——正常安装（仓库根 `pnpm install`，或插件安装事务）即得 `mmdc`，**无需任何全局安装**。代价是依赖树约 400MB；想跳过：
+**默认供给（vendored）**：插件以 `optionalDependencies` 内嵌 `@mermaid-js/mermaid-cli@^12`——正常安装（`dsh plugin add` 或源码 `pnpm install`）即得 `mmdc`，**无需任何全局安装**。代价是依赖树约 400MB；想跳过：
 
 ```sh
-pnpm install --no-optional   # 跳过内嵌渲染器；quiz / lesson-log / teach / SVG 链不受影响
+# npm 安装方式
+dsh plugin --profile desktop add dsh-learn-plugin --no-optional
+# 源码安装方式
+pnpm install --no-optional
 ```
+
+跳过后 quiz / lesson-log / teach / SVG 链不受影响。
 
 maker 按序探测 `mmdc`：先 `command -v mmdc`（用户全局安装**优先**，作为可选覆盖——想固定用自己装的版本就 `npm install -g @mermaid-js/mermaid-cli`），再内嵌副本 `<插件根>/node_modules/.bin/mmdc`。
 
 **浏览器供给**：安装期若 puppeteer 的构建脚本被放行，Chromium 随依赖落位（零浏览器要求）；被拦截（pnpm ≥10 默认拦截未白名单构建脚本）则无落位，maker 探测系统 Chrome/Chromium（macOS 应用路径 + Linux 常见路径 + `PATH` 兜底），探测到即写 puppeteer 配置（`executablePath` + `--no-sandbox`）复用系统浏览器渲染，**不下载任何 Chromium**。两类浏览器都不可得时，报告缺浏览器与安装指引（macOS 装 Google Chrome，Linux 装 `chromium` / `google-chrome` 发行版包）。
 
-冒烟测试（仓库根执行，任一浏览器供给方式下第 1 条或第 2 条应出 PNG）：
+冒烟测试（源码检出在仓库根执行，任一浏览器供给方式下第 1 条或第 2 条应出 PNG）：
 
 ```sh
 # 1) 直接渲染——内嵌浏览器已落位时即成功
@@ -111,44 +90,19 @@ brew install imagemagick   # 回退：提供 magick
 
 #### 降级行为
 
-- mermaid 链缺失 → mermaid 图示报告不可用并**分流**：缺 `mmdc`（内嵌可选依赖被跳过或安装失败）指向插件依赖安装（含"勿用 `--no-optional` 跳过"的反向说明，全局安装仅为可选覆盖）；缺浏览器给 Chrome/Chromium 安装指引。SVG 图示不受影响（反之亦然）。
+- mermaid 链缺失 → mermaid 图示报告不可用并**分流**：缺 `mmdc`（内嵌可选依赖被跳过或安装失败）指向插件依赖安装（含“勿用 `--no-optional` 跳过”的反向说明，全局安装仅为可选覆盖）；缺浏览器给 Chrome/Chromium 安装指引。SVG 图示不受影响（反之亦然）。
 - maker 无法验证渲染结果时报告 `UNAVAILABLE` + 缺失的依赖；教学会话随即跳过该图，而不是内嵌未验证的图。
 
-### 卸载
+## 卸载
 
-- 卸载插件：`dsh plugin --profile desktop remove link:.`（仓库根执行）并重启 DSH —— quiz 与 lesson-log 同时下线。
+- 卸载插件：`dsh plugin --profile desktop remove dsh-learn-plugin` 并重启 DSH —— quiz 与 lesson-log 同时下线。
 - 移除技能：随插件卸载一并下线（teach / visualize 内置于包内）；若只想换掉某个技能，放项目级同名 `.dsh/skills/<name>/` 覆盖即可，不必卸载。
 - 删除已发布的图示：清理 `viz/`；课程日志为普通 markdown，直接编辑或删除文件即可，卸载不影响既有日志。
 
-## 项目贡献方式
+## 许可证
 
-### 验证方式（harness）
+[MIT](https://github.com/Max-Loo/dsh-learn-plugin/blob/main/LICENSE)
 
-本仓库保留了三组可重复运行的开发验证（不随插件发布）：
+## 开发
 
-```sh
-# quiz 行为（校验、乱序、IDK、多选、防泄漏、子代理拒绝）：应 22/22 PASS
-DSH_HOME=<workspace dsh home> dsh web --patch ./test/quiz-harness.cordis.yml --no-open --port 0
-
-# lesson-log 行为（回填、保序、题面先于答案、命令路径、解除）：应 16/16 PASS
-DSH_HOME=<workspace dsh home> dsh web --patch ./test/log-harness.cordis.yml --no-open --port 0
-
-# 内置技能分发（目录字段、剥 frontmatter 正文、references 资源基址）：应 22/22 PASS
-DSH_HOME=<workspace dsh home> dsh web --patch ./test/skills-harness.cordis.yml --no-open --port 0
-```
-
-重启恢复镜像用 `test/restore-probe.ts` 两阶段探针验证（A 链接并退出；B 冷启动进程追加事件，断言恢复注记与新事件镜像）。端到端教学演练对照 [`openspec/specs/`](openspec/specs/) 各 Scenario 手工执行。
-
-> **注**：以上 overlay（`cordis.dev.yml` 与 `test/*.cordis.yml`）均以**绝对路径**插入插件模块——更换检出位置或在其他机器上复跑时，需把 yml 中的 `name:` 路径同步替换为当前仓库位置（本仓库更名自 `personal/dsh-learn/`，路径曾因此失配过一次）。
-
-### 开发工作流
-
-```sh
-pnpm install        # 仓库根安装依赖
-pnpm run build      # tsc 编译到 dist/lib/
-pnpm run pack       # build 后打包，tgz 输出到 dist/
-```
-
-- 改 `src/` 后重新 `pnpm run build`；link 安装的检出与覆盖层（`--patch ./cordis.dev.yml`）都从 `dist/lib` 加载。
-- 打包产物 `dist/dsh-learn-plugin-<version>.tgz` 含 `dist/lib/`、`client/`、`skills/`、`cordis.patch.yml` 与本 README；`src/`、`test/` 不入包。
-- 行为契约变更走 OpenSpec：改动前先更新 [`openspec/`](openspec/) 下对应 change，归档时合入主 specs。
+源码安装、覆盖层调试、行为验证 harness、npm 发布流程等见 [DEVELOPMENT.md](https://github.com/Max-Loo/dsh-learn-plugin/blob/main/DEVELOPMENT.md)。

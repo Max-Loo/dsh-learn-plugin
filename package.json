@@ -2,6 +2,15 @@
   "name": "dsh-learn-plugin",
   "version": "0.1.0",
   "description": "Graded quiz and lesson-log plugins for DeepSeek Harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Max-Loo/dsh-learn-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Max-Loo/dsh-learn-plugin/issues"
+  },
+  "homepage": "https://github.com/Max-Loo/dsh-learn-plugin#readme",
   "type": "module",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
