@@ -40,7 +40,15 @@ Keep the idea intact but trust the maker to compose; if your brief lists more th
 
 ## Invoke
 
-DSH has no named agent registry. Dispatch a maker with the `subagent` tool: read the template file for the chosen maker, replace `{BRIEF}` (and `{WORKDIR}` if you want output in a specific project directory; default is the session working directory) with your minimal, concrete brief, and pass the completed prompt as the `prompt` argument with a short `description` (e.g. "Mermaid diagram: TCP dependency graph").
+DSH has no named agent registry. Dispatch a maker with the `subagent` tool: read the template file for the chosen maker, replace the placeholders listed below, and pass the completed prompt as the `prompt` argument with a short `description` (e.g. "Mermaid diagram: TCP dependency graph").
+
+| Placeholder | Replace with | Applies to |
+|---|---|---|
+| `{BRIEF}` | Your minimal, concrete brief (see above) | both makers |
+| `{WORKDIR}` | The project directory the `viz/` folder lives in (default: the session working directory) | both makers |
+| `{MMDC_DIR}` | The installed plugin package root — the directory whose `node_modules/` vendors `mmdc` (see below) | mermaid-maker only |
+
+Deriving `{MMDC_DIR}`: the plugin vendors the mermaid renderer (`@mermaid-js/mermaid-cli`) as an optional dependency, and the mermaid-maker template probes `{MMDC_DIR}/node_modules/.bin/mmdc` as its fallback level. Take the resource base you read the template from (the skill's directory inside the installed plugin package, i.e. `<plugin-root>/skills/visualize/`) and go up two levels to get `<plugin-root>`. If no resource base is available (e.g. you loaded the template by hand), fall back to deriving it from the template file's own path: strip the trailing `skills/visualize/references/mermaid-maker.md` and use the remainder as the plugin root. If neither derivation is possible, leave `{MMDC_DIR}` unreplaced — the maker treats the vendored copy as not found and falls back to PATH probing.
 
 The maker authors the source, renders it to a PNG, **looks at the PNG and iterates until it is correct and clean** (using `bash` to render, `read_image` to inspect), publishes it into the project's `viz/` folder with a unique filename, and returns:
 
@@ -68,4 +76,4 @@ That's all. The DSH chat renders standard markdown images, and the lesson-log mi
 - PNG embed means **what the maker verified is pixel-identical to what the learner sees** — no re-render drift.
 - Unique filenames keep embed resolution unambiguous.
 
-> The makers render through system binaries: mermaid diagrams via `mmdc` (`@mermaid-js/mermaid-cli`, needs Chrome), SVG via `rsvg-convert` (fallback `magick`). The maker checks its chain first and reports clearly when it's missing. You don't render anything yourself — you only brief the maker and embed the file it returns.
+> The mermaid renderer is vendored with the plugin (`@mermaid-js/mermaid-cli` as an optional dependency; the maker probes a user's global `mmdc` first, then the vendored copy) and drives a Chrome/Chromium — bundled when the install fetched one, otherwise the system browser. SVG renders via `rsvg-convert` (fallback `magick`), a system binary. Each maker checks its chain first (smoke render as the final arbiter) and reports clearly when it's missing — a missing renderer points at the plugin's dependency install, a missing browser at browser installation. You don't render anything yourself — you only brief the maker and embed the file it returns.
