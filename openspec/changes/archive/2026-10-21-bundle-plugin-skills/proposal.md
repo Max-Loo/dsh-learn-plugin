@@ -31,5 +31,5 @@
 - **文档**：`docs/migrate-learn-to-dsh.md` 安装章节重写。
 - **依赖**：新增 peerDependency `@deepseek-ai/dsh-skill`（提供 `ctx.skills` 注册表服务；desktop profile 的宿主层常驻加载 `@deepseek-ai/dsh-skill`，服务在插件加载时可用）。
 - **不受影响**：DSH 本体；`teaching` / `lesson-visuals` / `graded-quiz` / `lesson-log` 的行为契约。
-- **验证前置**：desktop profile（`~/.dsh/profiles/desktop/package.json`）当前 `link:` 指向旧仓库路径 `/Users/luyuexing/Documents/projects/personal/dsh-learn/...`（现已空），验证前需改指向本仓库插件目录——属环境修正，不在本 change 的仓库编辑范围内。
+- **验证前置**：desktop profile（`~/.dsh/profiles/desktop/package.json`）当前 `link:` 指向旧仓库路径 `~/Documents/projects/personal/dsh-learn/...`（现已空），验证前需改指向本仓库插件目录——属环境修正，不在本 change 的仓库编辑范围内。
 - **风险**：`ctx.skills.registerProvider` 的 candidate 契约（字段、rank、resourceBase 形状）依据 app 实现反编译式调研得出，以第一方包行为为准；若 0.2.x 后续版本调整契约，需跟随调整（peer 版本约束会挡住大版本漂移）。

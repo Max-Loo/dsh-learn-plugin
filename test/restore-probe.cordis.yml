@@ -7,6 +7,6 @@
 # with the same process cwd (session storage is keyed by meta.cwd).
 - insert:
     - id: dsh-learn-plugin
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dist/lib/index.js
+      name: ../dist/lib/index.js
     - id: dsh-learn-plugin-restore-probe
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/test/restore-probe.ts
+      name: ./restore-probe.ts

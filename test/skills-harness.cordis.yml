@@ -2,6 +2,6 @@
 #   DSH_HOME=<workspace dsh home> dsh web --patch ./test/skills-harness.cordis.yml --no-open --port 0
 - insert:
     - id: dsh-learn-plugin
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dist/lib/index.js
+      name: ../dist/lib/index.js
     - id: dsh-learn-plugin-skills-harness
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/test/skills-harness.ts
+      name: ./skills-harness.ts

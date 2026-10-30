@@ -2,6 +2,6 @@
 #   dsh web --patch ./test/log-harness.cordis.yml --no-open
 - insert:
     - id: dsh-learn-plugin
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dist/lib/index.js
+      name: ../dist/lib/index.js
     - id: dsh-learn-plugin-log-harness
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/test/log-harness.ts
+      name: ./log-harness.ts

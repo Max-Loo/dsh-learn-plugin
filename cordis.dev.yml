@@ -1,9 +1,8 @@
 # Dev overlay (channel ①) for loading dsh-learn-plugin without installing it.
 #
-# The tutorial requires the plugin path to be absolute: patch files only
-# contribute configuration; the loader resolves module paths from the
-# profile directory. Replace the path below when working from another
-# checkout, then boot with:
+# Inserted plugin names that start with ./ or ../ are anchored to the patch
+# file's own directory (dsh-app-boot `anchorInsertedPluginNames`), so the path
+# below is checkout-relative and needs no editing. Boot with:
 #
 #   dsh web --patch ./cordis.dev.yml
 #
@@ -14,4 +13,4 @@
 # sibling imports back to `.ts`.
 - insert:
     - id: dsh-learn-plugin
-      name: /Users/luyuexing/Documents/projects/personal/dsh-learn-plugin/dist/lib/index.js
+      name: ./dist/lib/index.js
