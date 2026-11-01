@@ -44,14 +44,23 @@ dsh web --patch ./cordis.dev.yml
 # quiz 行为（校验、乱序、IDK、多选、防泄漏、子代理拒绝）：应 22/22 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./test/quiz-harness.cordis.yml --no-open --port 0
 
-# lesson-log 行为（回填、保序、题面先于答案、命令路径、解除）：应 16/16 PASS
+# lesson-log 行为（回填、保序、题面先于答案、命令路径、解除、外部编辑保留、
+# v1→v2 记录迁移水位、只读失败可见与按序补齐、非 .md 拒绝、越界需确认、
+# 命令外链）：应 32/32 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./test/log-harness.cordis.yml --no-open --port 0
 
 # 内置技能分发（目录字段、剥 frontmatter 正文、references 资源基址）：应 22/22 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./test/skills-harness.cordis.yml --no-open --port 0
 ```
 
-重启恢复镜像用 `test/restore-probe.ts` 两阶段探针验证（A 链接并退出；B 冷启动进程追加事件，断言恢复注记与新事件镜像）。端到端教学演练对照 [`openspec/specs/`](openspec/specs/) 各 Scenario 手工执行。
+重启恢复镜像用 `test/restore-probe.ts` 两阶段探针验证（A 阶段链接、写题面、持久化 quiz 调用后退出；B 阶段冷启动进程，从 v2 存储读取持久化水位，断言恢复注记与新事件镜像、水位下重放的历史不重复镜像（3.1），以及水位下重放的 quiz 调用其判定块在重启后补齐且出现在题面之后、题面不重复（3.2））。两阶段都必须与 A 同 cwd 运行（会话存储按 meta.cwd 键控），B 阶段探针会自行从 `<DSH_HOME>/storages/learn_dsh_lesson_log_v2.json` 读水位并以占位事件抬升 seq 越过水位，模拟真实重启的 seq 延续：
+
+```sh
+DSH_HOME=<workspace dsh home> RESTORE_PHASE=A dsh web --patch ./test/restore-probe.cordis.yml --no-open --port 0   # 等 "RESTORE PROBE A OK" 后结束该进程
+DSH_HOME=<workspace dsh home> RESTORE_PHASE=B dsh web --patch ./test/restore-probe.cordis.yml --no-open --port 0   # 新进程；四行输出应全 OK
+```
+
+端到端教学演练对照 [`openspec/specs/`](openspec/specs/) 各 Scenario 手工执行。
 
 > **注**：以上 overlay（`cordis.dev.yml` 与 `test/*.cordis.yml`）均以**绝对路径**插入插件模块——更换检出位置或在其他机器上复跑时，需把 yml 中的 `name:` 路径同步替换为当前仓库位置（本仓库更名自 `personal/dsh-learn/`，路径曾因此失配过一次）。
 
@@ -66,6 +75,14 @@ pnpm run pack       # build 后打包，tgz 输出到 dist/
 - 改 `src/` 后重新 `pnpm run build`；link 安装的检出与覆盖层（`--patch ./cordis.dev.yml`）都从 `dist/lib` 加载。
 - 打包产物 `dist/dsh-learn-plugin-<version>.tgz` 含 `dist/lib/`、`client/`、`skills/`、`cordis.patch.yml` 与 README；`src/`、`test/` 不入包。
 - 行为契约变更走 OpenSpec：改动前先更新 [`openspec/`](openspec/) 下对应 change，归档时合入主 specs。
+
+## 存储域版本迁移（lesson-log）
+
+链接记录的 schema 升级采用"**新域名 + 启动时搬移、旧域保留**"的手动迁移（`src/log.ts` 的 task 1.1 注释记录了完整审计过程）：
+
+- `@deepseek-ai/dsh-storage-domain` 0.2.1-rc.2 **没有自动迁移钩子**（version 不匹配 open 直接 `version-mismatch`），且 `compatibleVersions` 对宿主 json backend 的 `single` layout 整档文件**不生效**（实测严格精确版本）——同域名 v1→v2 升级无法打开旧数据，同域双开也会撞同一个版本戳。
+- 因此 v2 域使用独立域名 `learn_dsh_lesson_log_v2`：启动先开 v2 域，再以精确的 v1 spec 打开旧域 `learn_dsh_lesson_log`，把 v2 缺失的记录搬移过去，然后**关闭但不删除**旧域——旧版插件回滚后照常打开 v1 数据（只丢新水位，行为同升级前）。
+- 搬移的记录不带水位；`linkFor` 恢复链接时发现记录缺 `lastSeq`，经 `sessionQuery.readSession` 取该会话事件最大 seq 回填并 `table.put` 持久化（一次性）。
 
 ## 发布到 npm
 
