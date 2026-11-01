@@ -26,9 +26,18 @@ import { onQuizEvent, type QuizSettledEvent } from './quiz.js'
  * backfill the session's history through `ctx.sessionQuery`.
  */
 
-export const inject = ['tools', 'commands', 'storageDomain', 'sessionQuery']
+export const inject = ['tools', 'commands', 'storageDomain', 'sessionQuery', 'sessions', 'userQuestions']
 
 const linkRecord = z.object({
+  file: z.string(),
+  linkedAt: z.string(),
+  // v2: durable mirror watermark. Optional so v1 records (which lack it) stay
+  // valid against this schema; the restore path backfills it (see linkFor).
+  lastSeq: z.number().optional(),
+})
+
+/** The v1 record shape, for reading the legacy unit during migration. */
+const linkRecordV1 = z.object({
   file: z.string(),
   linkedAt: z.string(),
 })
@@ -36,11 +45,39 @@ const linkRecord = z.object({
 // Boundary cast: checking the full spec against defineDomain's zod generics
 // trips TS2589 (excessively deep); the runtime value is identical.
 const defineDomainUntyped = defineDomain as unknown as (spec: Record<string, unknown>) => unknown
+
+// Task 1.1 — migration path audit (design D4), settled empirically against
+// `@deepseek-ai/dsh-storage-domain` 0.2.1-rc.2:
+// 1. There is NO automatic migration hook — a stored unit whose stamped
+//    version differs from the spec rejects at open with `version-mismatch`
+//    (package README, "Known Limitations": "No data migration … changing a
+//    schema requires migrating the stored data by hand").
+// 2. `compatibleVersions` does NOT help here: the host json backend enforces
+//    exact-version reads for `single`-layout whole-unit files (verified live:
+//    opening this spec as version 2 over a version-1 unit rejected with
+//    "stored version 1 != expected 2"), so a same-name v1→v2 upgrade cannot
+//    open the legacy data at all — and a hard dual-open (open v1 spec, copy,
+//    reopen v2 spec) fails the same way, because the version stamp lives on
+//    the unit file itself.
+// 3. Therefore D4's fallback is the chosen path: migrate by hand into a NEW
+//    domain name (`_v2` suffix, version 2). On start the v2 domain opens
+//    first; the legacy unit is then opened under its exact v1 spec, its
+//    records are copied across, and it is closed but NEVER deleted — the
+//    previous plugin version can still open it, so a rollback loses only the
+//    new watermark and behaves exactly like the pre-upgrade build (design
+//    D4's rollback semantics, satisfied literally).
 const domainSpec = defineDomainUntyped({
+  name: 'learn_dsh_lesson_log_v2',
+  version: 2,
+  global: { schema: z.object({}), initial: {} },
+  tables: { links: domainTable(linkRecord) },
+})
+
+const legacyDomainSpec = defineDomainUntyped({
   name: 'learn_dsh_lesson_log',
   version: 1,
   global: { schema: z.object({}), initial: {} },
-  tables: { links: domainTable(linkRecord) },
+  tables: { links: domainTable(linkRecordV1) },
 })
 
 const QA_TOOLS = new Set(['quiz', 'ask_user_question'])
@@ -232,16 +269,42 @@ function asToolResult(data: unknown): ToolResultView | undefined {
 
 interface LinkState {
   file: string
+  linkedAt: string
   lastSeq: number
+  /**
+   * Blocks awaiting a successful append, in arrival order (task 2.2: a failed
+   * write stays here and the watermark does not move until it lands).
+   */
+  pending: PendingWrite[]
+  /** Consecutive failed append attempts; cleared on the next success. */
+  failures: number
 }
+
+interface PendingWrite {
+  /** Event seq this write is tied to; the watermark advances to it on success. */
+  seq: number
+  blocks: string[]
+}
+
+/** Consecutive append failures before the write problem is surfaced (design D2). */
+const FAILURE_THRESHOLD = 3
+
+/** Per-link retry backoff timers, so a stalled mirror retries without new events. */
+const retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 export function apply(ctx: Context): void {
   const links = new Map<string, LinkState>()
   const knownUnlinked = new Set<string>()
   const askedQuiz = new Set<string>()
   const callMeta = new Map<string, { name: string; args: unknown }>()
+  // Task 3.2 (design D6): the persisted history is replay-searched at most
+  // once per session per process — the first unmatched tool/result triggers
+  // it; everything after that comes from memory (live tool/call events keep
+  // callMeta fresh).
+  const rebuiltSessions = new Set<string>()
 
   type LinkRecord = z.infer<typeof linkRecord>
+  type LinkRecordV1 = z.infer<typeof linkRecordV1>
   interface OpenedDomain {
     table(name: string): KvTable<string, LinkRecord>
     close(): Promise<void>
@@ -262,6 +325,29 @@ export function apply(ctx: Context): void {
     } catch (error) {
       console.error(`dsh-learn-plugin lesson-log: storage domain failed: ${String(error)}`)
       ctx.logger.warn(`dsh-learn-plugin lesson-log: storage domain unavailable (${String(error)}); links will not persist`)
+      return
+    }
+    // Task 1.2 — one-time v1 migration (design D4 fallback): open the legacy
+    // unit under its exact v1 spec, copy records the v2 table is missing, and
+    // close it WITHOUT deleting it, so the previous plugin version can still
+    // open it after a rollback. Copies carry no watermark; the restore path
+    // (linkFor) backfills it from the persisted session history.
+    try {
+      const storageDomain = ctx.storageDomain as unknown as { open: (spec: unknown) => Promise<OpenedDomain> }
+      const legacy = await storageDomain.open(legacyDomainSpec)
+      try {
+        const legacyLinks = legacy.table('links') as unknown as KvTable<string, LinkRecordV1>
+        for (const [key, record] of legacyLinks.entries()) {
+          if (table === undefined || table.get(key) !== undefined) continue
+          await table.put(key, { file: record.file, linkedAt: record.linkedAt })
+        }
+      } finally {
+        await legacy.close()
+      }
+    } catch (error) {
+      // No legacy unit (fresh installs) or an unreadable one — either way the
+      // v2 domain is authoritative and this is not a failure.
+      ctx.logger.warn(`dsh-learn-plugin lesson-log: v1 migration skipped (${String(error)})`)
     }
   })()
 
@@ -276,14 +362,93 @@ export function apply(ctx: Context): void {
     return run as Promise<T>
   }
 
+  // True append (task 2.1, design D1): one fsp.appendFile per write, never a
+  // full-file read-modify-write — existing content is never rewritten,
+  // reordered, or truncated, and a crashed write cannot destroy it. A
+  // pre-write stat decides the blank-line separator (size 0 → treat the file
+  // as empty → omit the leading "\n\n"). Failures propagate: the caller owns
+  // watermark advancement and retry (task 2.2).
   async function appendToFile(file: string, text: string): Promise<void> {
+    let size = 0
     try {
-      let current = ''
-      if (fs.existsSync(file)) current = await fsp.readFile(file, 'utf8')
-      const prefix = current.trim().length > 0 ? '\n\n' : ''
-      await fsp.writeFile(file, current + prefix + text + '\n', 'utf8')
+      size = (await fsp.stat(file)).size
+    } catch {
+      size = 0 // absent/unreadable → treat as empty; appendFile surfaces real errors
+    }
+    const prefix = size > 0 ? '\n\n' : ''
+    await fsp.appendFile(file, prefix + text + '\n', 'utf8')
+  }
+
+  // Design D3/D5: after a successful append, persist the watermark at once so
+  // a crash can only ever repeat one block, never silently drop one.
+  async function persistWatermark(sessionId: string, link: LinkState): Promise<void> {
+    if (table === undefined) return
+    try {
+      await table.put(sessionId, { file: link.file, linkedAt: link.linkedAt, lastSeq: link.lastSeq })
     } catch (error) {
-      ctx.logger.warn(`dsh-learn-plugin lesson-log: append to "${file}" failed: ${String(error)}`)
+      ctx.logger.warn(`dsh-learn-plugin lesson-log: watermark persist failed for "${link.file}": ${String(error)}`)
+    }
+  }
+
+  // Design D2: surface a stalled mirror — logger always; a session-visible
+  // system notice when the sessions service can answer (headless runs keep
+  // the log-only path). Notice source.kind ≠ 'user' so the mirror itself
+  // never mirrors this warning.
+  function reportWriteFailure(sessionId: string, link: LinkState, error: unknown): void {
+    const detail = `${link.failures} consecutive appends to "${link.file}" failed; mirroring is paused and pending blocks will be appended in order once the file is writable again. Last error: ${String(error)}`
+    ctx.logger.error(`dsh-learn-plugin lesson-log: ${detail}`)
+    try {
+      const session = ctx.sessions.get(sessionId as never)
+      if (session === undefined) return
+      session.append('user/message', {
+        id: `lesson-log-write-failure-${Date.now()}`,
+        role: 'user',
+        content: [{ type: 'text', text: `lesson-log: ${detail}` }],
+        source: { kind: 'dsh-learn-plugin', form: 'notice', summary: 'lesson-log write failure' },
+      } as never, { surfaceOp: 'append' } as never)
+    } catch {
+      // No live session in this process — the logger.error above is the report.
+    }
+  }
+
+  // Retry a stalled link after a backoff, without waiting for new events.
+  function scheduleRetry(sessionId: string, link: LinkState): void {
+    if (retryTimers.has(sessionId)) return
+    const delay = Math.min(2000 * 2 ** Math.min(link.failures - 1, 4), 30000)
+    const timer = setTimeout(() => {
+      retryTimers.delete(sessionId)
+      void withLock(async () => {
+        await ready
+        if (links.get(sessionId) !== link) return // unlinked or re-linked meanwhile
+        await flushLink(sessionId, link)
+      }).catch(() => {})
+    }, delay)
+    timer.unref?.()
+    retryTimers.set(sessionId, timer)
+  }
+
+  // Task 2.2: drain a link's pending writes strictly in order. A failed head
+  // stops the drain (ordering preserved), counts a failure, reports at the
+  // threshold, and schedules a backoff retry; a success clears the flag,
+  // advances the watermark to the write's seq, and persists it.
+  async function flushLink(sessionId: string, link: LinkState): Promise<void> {
+    while (link.pending.length > 0) {
+      const head = link.pending[0]
+      if (head === undefined) break
+      try {
+        for (const block of head.blocks) await appendToFile(link.file, block)
+      } catch (error) {
+        link.failures += 1
+        if (link.failures >= FAILURE_THRESHOLD) reportWriteFailure(sessionId, link, error)
+        scheduleRetry(sessionId, link)
+        return
+      }
+      link.pending.shift()
+      link.failures = 0
+      if (head.seq > link.lastSeq) {
+        link.lastSeq = head.seq
+        await persistWatermark(sessionId, link)
+      }
     }
   }
 
@@ -295,12 +460,76 @@ export function apply(ctx: Context): void {
       knownUnlinked.add(sessionId)
       return undefined
     }
-    // Restore the link for a resumed session before mirroring continues.
-    const state: LinkState = { file: record.file, lastSeq: 0 }
+    // Restore the link for a resumed session before mirroring continues
+    // (design D5: the durable watermark is the ONLY replay boundary).
+    const state: LinkState = { file: record.file, linkedAt: record.linkedAt, lastSeq: 0, pending: [], failures: 0 }
     links.set(sessionId, state)
     knownUnlinked.delete(sessionId)
-    await appendToFile(record.file, restoreNoteBlock(record.file))
+    if (record.lastSeq === undefined) {
+      // Task 1.2 — v1 record migration (design D4): v1 carried no watermark.
+      // One-time backfill from the persisted history: the max event seq
+      // becomes the initial watermark (skip what the tail of the last run
+      // may have missed — v1's inherent gap — rather than re-mirror the whole
+      // history). The history is already read here, so rebuilding the call
+      // context (task 3.2) is free, and this session's one-shot replay-search
+      // budget is spent with it.
+      try {
+        const log = await ctx.sessionQuery.readSession(sessionId as Parameters<typeof ctx.sessionQuery.readSession>[0])
+        const events = log.events as EventView[]
+        let maxSeq = 0
+        for (const event of events) maxSeq = Math.max(maxSeq, typeof event.seq === 'number' ? event.seq : 0)
+        state.lastSeq = maxSeq
+        rebuildCallContextFromEvents(sessionId, events)
+      } catch (error) {
+        ctx.logger.warn(`dsh-learn-plugin lesson-log: v1 migration read failed for ${sessionId} (watermark stays 0): ${String(error)}`)
+      }
+      await persistWatermark(sessionId, state)
+      rebuiltSessions.add(sessionId)
+    } else {
+      // v2 record: the durable watermark is trusted as-is; the one-shot
+      // replay-search budget stays available for the first unmatched
+      // tool/result (task 3.2) — a restarted process has an empty callMeta
+      // and may need it for a cross-restart verdict.
+      state.lastSeq = record.lastSeq
+    }
+    // The restore note rides the same pending queue: no special error path,
+    // no watermark movement (seq 0), reported like any other stalled write.
+    state.pending.push({ seq: 0, blocks: [restoreNoteBlock(record.file)] })
+    await flushLink(sessionId, state)
     return state
+  }
+
+  // Task 3.2 (design D6): rebuild {name, args} for persisted tool calls once
+  // a restored session's first tool/result misses the in-memory callMeta.
+  // quiz calls are also re-marked in askedQuiz — their 题面 was written by the
+  // pre-restart process's asked hook, so a post-restart verdict must append
+  // the verdict only, never a second question block.
+  function rebuildCallContextFromEvents(_sessionId: string, events: EventView[]): void {
+    for (const event of events) {
+      if (event.type !== 'tool/call') continue
+      const call = asToolCall(event.data)
+      if (call === undefined) continue
+      if (!callMeta.has(call.callId)) callMeta.set(call.callId, { name: call.name, args: call.arguments })
+      if (call.name === 'quiz') askedQuiz.add(call.callId)
+    }
+  }
+
+  // The one-shot budget is spent only when the read log actually resolves the
+  // target call: a partial read (persistence lag) keeps the budget so the
+  // next unmatched result retries after the log catches up.
+  async function rebuildCallContext(sessionId: string, targetCallId: string | undefined): Promise<boolean> {
+    if (targetCallId !== undefined && callMeta.has(targetCallId)) return true
+    if (rebuiltSessions.has(sessionId)) return false
+    try {
+      const log = await ctx.sessionQuery.readSession(sessionId as Parameters<typeof ctx.sessionQuery.readSession>[0])
+      const events = log.events as EventView[]
+      rebuildCallContextFromEvents(sessionId, events)
+      if (targetCallId === undefined || callMeta.has(targetCallId)) rebuiltSessions.add(sessionId)
+      return targetCallId === undefined || callMeta.has(targetCallId)
+    } catch (error) {
+      ctx.logger.warn(`dsh-learn-plugin lesson-log: call-context replay failed for ${sessionId}: ${String(error)}`)
+      return false
+    }
   }
 
   function askQuestionsOf(args: unknown): Array<{ id: string; question: string; options: Array<{ label: string }> }> {
@@ -394,17 +623,45 @@ export function apply(ctx: Context): void {
       await ready
       const link = await linkFor(session.id)
       if (link === undefined) return
+      // Task 3.1 (design D5): the durable watermark is the only boundary —
+      // replayed or not, anything at or below it is already mirrored.
       if (typed.seq <= link.lastSeq) return
+      // Task 3.2: a restored session's first tool/result may miss callMeta
+      // (memory died with the old process). Replay-search the persisted
+      // history for that call before deciding on blocks — a partial read
+      // keeps the budget and later results retry.
+      if (typed.type === 'tool/result') {
+        const result = asToolResult(typed.data)
+        if (result !== undefined && !callMeta.has(result.callId)) {
+          await rebuildCallContext(session.id, result.callId)
+        }
+      }
       const blocks = blocksForEvent(typed, 'live')
-      if (blocks.length === 0) return
-      link.lastSeq = typed.seq
-      for (const block of blocks) await appendToFile(link.file, block)
+      if (blocks.length === 0) {
+        // Contentless events advance the in-memory boundary only — replaying
+        // them after a crash writes nothing, so persisting each one is pure
+        // churn. The exception is a quiz call (the 题面 boundary): its
+        // watermark IS meaningful, because a restart must not replay the call
+        // and then re-ask the question on the verdict (task 3.2).
+        if (typed.seq > link.lastSeq) {
+          link.lastSeq = typed.seq
+          if (typed.type === 'tool/call' && asToolCall(typed.data)?.name === 'quiz') {
+            await persistWatermark(session.id, link)
+          }
+        }
+        return
+      }
+      // Task 2.2: the watermark moves only when the write lands.
+      link.pending.push({ seq: typed.seq, blocks })
+      await flushLink(session.id, link)
     })
   })
 
   // Quiz questions carry the post-shuffle display order and no answer —
   // written through this hook the moment the question goes out, before the
-  // user answers.
+  // user answers. The askedQuiz marker is set only after the write lands: if
+  // it fails, the graded result later writes question+verdict together, so
+  // the log self-heals instead of leaving a dangling verdict.
   onQuizEvent((quizEvent) => {
     if (quizEvent.phase !== 'asked') return
     void withLock(async () => {
@@ -412,8 +669,13 @@ export function apply(ctx: Context): void {
       const link = await linkFor(quizEvent.sessionId)
       if (link === undefined) return
       if (askedQuiz.has(quizEvent.callId)) return
+      try {
+        await appendToFile(link.file, questionCallout('Quiz', quizEvent.question, quizEvent.displayedOptions))
+      } catch (error) {
+        ctx.logger.warn(`dsh-learn-plugin lesson-log: quiz question pre-write failed (will be folded into the verdict block): ${String(error)}`)
+        return
+      }
       askedQuiz.add(quizEvent.callId)
-      await appendToFile(link.file, questionCallout('Quiz', quizEvent.question, quizEvent.displayedOptions))
     })
   })
 
@@ -421,7 +683,43 @@ export function apply(ctx: Context): void {
   // Link / unlink (tool + user command share one implementation)
   // -----------------------------------------------------------------------
 
-  async function linkSession(session: { id: string; seq: number; header: { cwd?: string; origin?: string } } | undefined, fileArg: string): Promise<string> {
+  interface LinkSessionOptions {
+    /** `/lesson-log` command path: the user typed it, so outside-workspace paths are pre-confirmed (design D7). */
+    confirmedByUser?: boolean
+    /** Live agent from the tool execution context, for the confirmation question. */
+    agent?: unknown
+    /** Cancellation lifetime of the confirmation question. */
+    signal?: AbortSignal
+  }
+
+  // Design D7: a tool-initiated (agent) link outside the session working
+  // directory needs the user's explicit yes. Without an answer UI (headless
+  // runs) the ask fails loud with a pointer to the command path.
+  async function confirmOutsideWorkspace(resolved: string, base: string, options: LinkSessionOptions): Promise<void> {
+    const decline = (why: string): Error =>
+      new Error(`Not linked: ${resolved} — it is outside this session's working directory (${base}) and ${why}. Re-run via the /lesson-log command to confirm it yourself.`)
+    const userQuestions = (ctx as { userQuestions?: { ask?: (request: unknown) => Promise<{ answers: Array<{ id: string; selected: string[] }> }> } }).userQuestions
+    if (typeof userQuestions?.ask !== 'function') throw decline('no answer UI is connected to confirm it')
+    let answer: { answers: Array<{ id: string; selected: string[] }> }
+    try {
+      answer = await userQuestions.ask({
+        questions: [{
+          id: 'lesson-log-outside-confirm',
+          question: `Link ${resolved} as this session's lesson log? It is OUTSIDE the session working directory (${base}).`,
+          header: 'lesson-log',
+          options: [{ label: 'Yes, link it' }, { label: 'No' }],
+        }],
+        ...(options.agent !== undefined ? { agent: options.agent } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      })
+    } catch (error) {
+      throw decline(`the confirmation question failed (${String(error)})`)
+    }
+    const first = answer.answers[0]
+    if (first === undefined || !first.selected.includes('Yes, link it')) throw decline('you declined it')
+  }
+
+  async function linkSession(session: { id: string; seq: number; header: { cwd?: string; origin?: string } } | undefined, fileArg: string, options: LinkSessionOptions = {}): Promise<string> {
     if (session === undefined) throw new Error('lesson_log requires a live session')
     if (session.header.origin === 'subagent') {
       throw new Error('lesson_log must be called from the main session, not a subagent')
@@ -430,29 +728,46 @@ export function apply(ctx: Context): void {
     if (trimmed === '') throw new Error('lesson_log requires a file path')
     await ready
     if (table === undefined) throw new Error('lesson_log unavailable: plugin storage did not start')
-    const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(session.header.cwd ?? process.cwd(), trimmed)
+    const base = session.header.cwd ?? process.cwd()
+    const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(base, trimmed)
     if (!fs.existsSync(resolved)) throw new Error(`File does not exist: ${resolved} (lesson_log links an existing note; create it first — it never creates files)`)
     if (!fs.statSync(resolved).isFile()) throw new Error(`Not a file: ${resolved}`)
+    // Task 4.1 (design D7): markdown targets only — the log is Obsidian
+    // callouts, and the guard keeps arbitrary files out of the mirror.
+    if (path.extname(resolved).toLowerCase() !== '.md') {
+      throw new Error(`Not a markdown file: ${resolved} (lesson_log only accepts .md files)`)
+    }
+    const rel = path.relative(base, resolved)
+    const insideWorkspace = rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+    if (!insideWorkspace && options.confirmedByUser !== true) {
+      await confirmOutsideWorkspace(resolved, base, options)
+    }
 
     // Backfill the session history through the query channel.
     let backfilled = 0
     let lastSeq = 0
+    const blocks: string[] = []
     try {
       const log = await ctx.sessionQuery.readSession(session.id as Parameters<typeof ctx.sessionQuery.readSession>[0])
-      const blocks: string[] = []
       for (const event of log.events) {
         const block = blocksForEvent(event as EventView, 'replay')
         if (block.length > 0) backfilled += 1
         blocks.push(...block)
         lastSeq = Math.max(lastSeq, (event as { seq?: unknown }).seq === undefined ? 0 : (event as { seq: number }).seq)
       }
-      if (blocks.length > 0) await appendToFile(resolved, blocks.join('\n\n'))
     } catch (error) {
-      ctx.logger.warn(`dsh-learn-plugin lesson-log: backfill failed: ${String(error)}`)
+      ctx.logger.warn(`dsh-learn-plugin lesson-log: backfill read failed: ${String(error)}`)
     }
-    await table.put(session.id, { file: resolved, linkedAt: new Date().toISOString() })
-    links.set(session.id, { file: resolved, lastSeq })
+    const state: LinkState = { file: resolved, linkedAt: new Date().toISOString(), lastSeq, pending: [], failures: 0 }
+    // Task 2.2: backfill content rides the pending queue too — a failed
+    // append is retried and reported like live mirroring, never dropped.
+    if (blocks.length > 0) state.pending.push({ seq: lastSeq, blocks })
+    await table.put(session.id, { file: resolved, linkedAt: state.linkedAt, lastSeq })
+    links.set(session.id, state)
     knownUnlinked.delete(session.id)
+    // The replay above already rebuilt this session's call context.
+    rebuiltSessions.add(session.id)
+    await flushLink(session.id, state)
     return `Linked: ${resolved} (${backfilled} entries backfilled)`
   }
 
@@ -462,6 +777,11 @@ export function apply(ctx: Context): void {
     const link = links.get(session.id)
     links.delete(session.id)
     knownUnlinked.add(session.id)
+    const timer = retryTimers.get(session.id)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      retryTimers.delete(session.id)
+    }
     if (table !== undefined) await table.delete(session.id)
     if (link === undefined) return 'No file linked'
     return `Unlinked: ${path.basename(link.file)}`
@@ -471,6 +791,7 @@ export function apply(ctx: Context): void {
     name: 'lesson_log',
     description:
       'Link an EXISTING markdown file as this session’s lesson log: the plugin mirrors user questions, teaching prose, and quiz/ask_user_question Q&A into it as Obsidian callouts (history is backfilled; the link survives restarts). ' +
+      'Only .md files are accepted — never other formats. Paths OUTSIDE this session’s working directory trigger a yes/no confirmation question for the user; without an answer UI the call fails, so use the /lesson-log command instead to confirm such a path yourself. ' +
       'The file must already exist — this tool never creates files, so a typo cannot scatter new notes. Main session only.',
     parameters: {
       file: { type: 'string', required: true, description: 'Path to an existing .md file (absolute, or relative to the session working directory).' },
@@ -478,7 +799,7 @@ export function apply(ctx: Context): void {
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     async execute(args, exec) {
       const file = typeof (args as { file?: unknown }).file === 'string' ? ((args as { file: string }).file) : ''
-      return linkSession(exec.agent?.session as Parameters<typeof linkSession>[0], file)
+      return linkSession(exec.agent?.session as Parameters<typeof linkSession>[0], file, { agent: exec.agent, signal: exec.signal })
     },
   }))
 
@@ -498,7 +819,8 @@ export function apply(ctx: Context): void {
     input: { hint: '<file>' },
     handler: async ({ agent, rawInput }) => {
       try {
-        return { kind: 'success' as const, text: await linkSession(agent.session as Parameters<typeof linkSession>[0], rawInput) }
+        // The user typed this command: outside-workspace paths are confirmed by that act (design D7).
+        return { kind: 'success' as const, text: await linkSession(agent.session as Parameters<typeof linkSession>[0], rawInput, { confirmedByUser: true }) }
       } catch (error) {
         return { kind: 'error' as const, text: error instanceof Error ? error.message : String(error) }
       }
