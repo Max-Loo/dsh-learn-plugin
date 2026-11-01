@@ -75,11 +75,11 @@ maker 按序探测 `mmdc`：先 `command -v mmdc`（用户全局安装**优先**
 
 ```sh
 # 1) 直接渲染——内嵌浏览器已落位时即成功
-printf 'graph TD\n  A-->B\n' > .mmdc-smoke.mmd && ./node_modules/.bin/mmdc -i .mmdc-smoke.mmd -o .mmdc-smoke.png
+printf 'graph TD\n  A-->B\n' > .mmdc-smoke.mmd && ./node_modules/.bin/mmdc -i .mmdc-smoke.mmd -o .mmdc-smoke.png -s 2 -b white
 
 # 2) 若第 1 条报找不到 chrome-headless-shell / Chrome（无内嵌浏览器），指向系统 Chrome 重试
 printf '{\n  "executablePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",\n  "args": ["--no-sandbox"]\n}\n' > .mmdc-puppeteer.json
-./node_modules/.bin/mmdc -i .mmdc-smoke.mmd -o .mmdc-smoke.png -p .mmdc-puppeteer.json
+./node_modules/.bin/mmdc -i .mmdc-smoke.mmd -o .mmdc-smoke.png -s 2 -b white -p .mmdc-puppeteer.json
 ```
 
 （Linux 上把 `executablePath` 换成 `chromium` / `google-chrome` 的实际路径。）

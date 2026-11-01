@@ -38,7 +38,7 @@ UNAVAILABLE
 
 followed by one line naming what is missing and an install hint (`brew install librsvg` for rsvg-convert, or `brew install imagemagick` for magick).
 
-When rendering later, use whichever binary answered: `rsvg-convert -o out.png in.svg` or `magick in.svg out.png`.
+When rendering later, use whichever binary answered: `rsvg-convert -z 2 -o out.png in.svg` or `magick -density 192 -background white in.svg out.png`.
 
 ## Your superpower: exact control
 
@@ -52,7 +52,7 @@ You are done only when you have **looked at the rendered PNG (via `read_image`) 
 
 1. **Plan the coordinate space.** Choose a `viewBox` and sketch where each element sits before drawing. Leave margins so nothing touches the edge. Keep it to ONE idea and few elements.
 2. **Write the source** with `write` to `{WORKDIR}/.viz-work/<slug>.svg` (create the directory with `bash` first): a complete `<svg>…</svg>` with explicit `width`/`height` (or viewBox), a white or transparent background, readable `font-family="sans-serif"`, and font sizes large enough to read when embedded.
-3. **Render a preview** with `bash` (see Step 0 for the binary). Then **look at it** with `read_image`.
+3. **Render a preview** with `bash`: `rsvg-convert -z 2 -o out.png in.svg` or `magick -density 192 -background white in.svg out.png` (see Step 0 for the binary). Then **look at it** with `read_image`.
 4. **LOOK critically:**
    - Is every coordinate, angle, direction, and proportion actually correct? Re-derive the geometry if unsure.
    - Are labels placed clearly, not overlapping lines or each other?

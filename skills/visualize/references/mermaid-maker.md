@@ -43,7 +43,7 @@ If neither exists, skip straight to the missing-`mmdc` UNAVAILABLE report below.
 ```bash
 cd "{WORKDIR}"
 printf 'graph TD\n  A-->B\n' > .mmdc-smoke.mmd
-"$MMDC" -i .mmdc-smoke.mmd -o .mmdc-smoke.png && echo CHAIN-OK
+"$MMDC" -i .mmdc-smoke.mmd -o .mmdc-smoke.png -s 2 -b white && echo CHAIN-OK
 ```
 
 If it failed with a missing-browser error (mentions Chrome / chrome-headless-shell not found), probe for a **system** Chrome/Chromium — candidate table (macOS app paths + common Linux paths), `command -v` as fallback — and retry through a puppeteer config file:
@@ -61,11 +61,11 @@ done
 CHROME="${CHROME:-$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)}"
 if [ -n "$CHROME" ]; then
   printf '{\n  "executablePath": "%s",\n  "args": ["--no-sandbox"]\n}\n' "$CHROME" > .mmdc-puppeteer.json
-  "$MMDC" -i .mmdc-smoke.mmd -o .mmdc-smoke.png -p .mmdc-puppeteer.json && echo CHAIN-OK
+  "$MMDC" -i .mmdc-smoke.mmd -o .mmdc-smoke.png -s 2 -b white -p .mmdc-puppeteer.json && echo CHAIN-OK
 fi
 ```
 
-Remember which attempt succeeded — render every later diagram the same way: plain `"$MMDC" -i <src>.mmd -o <src>.png` if the first attempt worked, with `-p .mmdc-puppeteer.json` appended if only the second did.
+Remember which attempt succeeded — render every later diagram the same way: plain `"$MMDC" -i <src>.mmd -o <src>.png -s 2 -b white` if the first attempt worked, with `-p .mmdc-puppeteer.json` appended if only the second did.
 
 **3. If the chain cannot be provisioned, do NOT try workarounds.** End your response with exactly:
 
@@ -89,7 +89,7 @@ You are not done when the diagram renders. You are done when you have **looked a
 
 1. **Understand the idea, then cut.** A brief is a wish-list, not a spec. Keep the idea intact but drop any node/label that doesn't earn its place. If you're about to draw more than ~7 nodes, stop and simplify — a diagram of 4 nodes that each pull weight beats one of 12 that fight for space. Cramming is the #1 way these fail.
 2. **Write the source** with `write` to `{WORKDIR}/.viz-work/<slug>.mmd` (create the directory with `bash` first). Pick the diagram type that fits: `graph TD`/`LR` (dependency graphs, flows), `sequenceDiagram`, `stateDiagram-v2`, `erDiagram`, `mindmap`, `timeline`, `classDiagram`.
-3. **Render a preview** with `bash`: `"$MMDC" -i <src>.mmd -o <src>.png` (append `-p .mmdc-puppeteer.json` if Step 0 needed the system-browser config). Then **look at it** with `read_image`.
+3. **Render a preview** with `bash`: `"$MMDC" -i <src>.mmd -o <src>.png -s 2 -b white` (append `-p .mmdc-puppeteer.json` if Step 0 needed the system-browser config). Then **look at it** with `read_image`.
 4. **LOOK critically:**
    - Is every arrow pointing the right way? Is every dependency/relationship actually true to the brief?
    - Are the labels correct and unambiguous?
