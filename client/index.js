@@ -109,7 +109,10 @@ window.__ModuleLoader__.load({
 		function SettledCard({ meta, block }) {
 			const selected = new Set(meta.answers)
 			const correct = new Set(meta.correctAnswer)
-			const verdict = meta.dontKnow ? 'I don’t know' : meta.status === 'correct' ? 'Correct ✓' : 'Incorrect ✗'
+			// Task 4.1 (design D5): a skipped panel rides the dontKnow channel —
+			// no ✗ anywhere, correct answer(s) get ✓ — and the verdict label says
+			// "skipped" instead of "I don't know".
+			const verdict = meta.skipped === true ? 'Skipped (no answer given)' : meta.dontKnow ? 'I don’t know' : meta.status === 'correct' ? 'Correct ✓' : 'Incorrect ✗'
 			const verdictKey = meta.dontKnow ? 'dontKnow' : meta.status === 'correct' ? 'correct' : 'incorrect'
 			const children = [
 				h('p', { key: 'q', className: 'learnQuiz_question' }, meta.question),

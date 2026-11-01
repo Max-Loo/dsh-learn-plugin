@@ -15,6 +15,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
  * Anti-leak: before the user answers, nothing user-visible may show
  * `correctAnswer` or `explanation` — `presentCall` carries the question only,
  * and the Web client view (client/index.js) never renders raw args.
+ *
+ * Skip semantics (task 4.1, design D5): an empty submission — no option
+ * chosen and no custom text — rides the dontKnow channel (never incorrect)
+ * with `skipped: true`, so the client and the lesson-log title it "skipped"
+ * instead of "I don't know".
  */
 
 export const inject = ['tools', 'userQuestions']
@@ -45,6 +50,13 @@ export type QuizSettledEvent = Omit<QuizAskedEvent, 'phase'> & {
   customAnswer?: string
   correct: boolean
   dontKnow: boolean
+  /**
+   * Task 4.1 (design D5): true only when the panel was skipped — no option
+   * chosen AND no custom text. dontKnow is then also true (same channel,
+   * never incorrect); this flag lets the client and the lesson-log title the
+   * verdict "skipped" instead of "I don't know".
+   */
+  skipped?: boolean
   correctIndices: number[]
   correctAnswer: string[]
   explanation: string
@@ -183,13 +195,24 @@ function feedbackText(meta: {
   correctAnswer: string[]
   explanation: string
   dontKnow: boolean
+  skipped?: boolean
 }): string {
-  const verdict =
-    meta.dontKnow ? "I don't know (genuine knowledge gap, not a wrong guess)" : meta.status === 'correct' ? 'Correct ✓' : 'Incorrect ✗'
+  // Task 4.1 (design D5): a skipped panel is NOT a wrong guess — the verdict
+  // says so in text, shows no ✗, and still reveals the correct answer.
+  const verdict = meta.skipped === true
+    ? 'Skipped (no answer given — not a wrong guess)'
+    : meta.dontKnow
+      ? "I don't know (genuine knowledge gap, not a wrong guess)"
+      : meta.status === 'correct'
+        ? 'Correct ✓'
+        : 'Incorrect ✗'
+  const answerLine = meta.skipped === true
+    ? 'Your answer: (skipped)'
+    : `Your answer: ${meta.answers.length > 0 ? meta.answers.join(', ') : '—'}`
   const lines = [
     `Quiz result: ${verdict}`,
     `Question: ${meta.question}`,
-    `Your answer: ${meta.answers.length > 0 ? meta.answers.join(', ') : '—'}`,
+    answerLine,
     `Correct answer: ${meta.correctAnswer.join(', ')}`,
     `Explanation: ${meta.explanation}`,
   ]
@@ -205,6 +228,7 @@ export function apply(ctx: Context): void {
       'Give each option a stable `value` and set `correctAnswer` to that value (not a position); ' +
       'grading matches the exact set of values. Options are shuffled by default (pass shuffle: false only when order carries meaning). ' +
       '"I don\'t know" is appended automatically and reported as dontKnow — a genuine knowledge gap, distinct from a wrong guess. ' +
+      'An EMPTY submission (no option chosen and no custom text) is also reported on the dontKnow channel with `skipped: true` — never as incorrect; treat it as "the user did not answer". ' +
       'explanation is required and shown only after the user answers.',
     parameters: {
       question: { type: 'string', required: true, description: 'The single question to ask.' },
@@ -247,6 +271,7 @@ export function apply(ctx: Context): void {
           correctIndices: { type: 'array', required: true, items: { type: 'integer' } },
           correct: { type: 'boolean', required: true },
           dontKnow: { type: 'boolean', required: true },
+          skipped: { type: 'boolean', description: 'True when the user submitted without answering (no option, no custom text).' },
           explanation: { type: 'string', required: true },
           displayedOptions: {
             type: 'array',
@@ -280,7 +305,7 @@ export function apply(ctx: Context): void {
       if (meta === undefined || typeof meta !== 'object' || typeof meta.explanation !== 'string') return undefined
       return {
         card: 'generic',
-        title: `Quiz — ${meta.dontKnow ? 'I don\u2019t know' : meta.correct ? 'Correct ✓' : 'Incorrect ✗'}`,
+        title: `Quiz — ${meta.skipped === true ? 'skipped' : meta.dontKnow ? 'I don\u2019t know' : meta.correct ? 'Correct ✓' : 'Incorrect ✗'}`,
         kind: 'other',
         content: [{ type: 'text', text: feedbackText(meta) }],
       }
@@ -345,7 +370,13 @@ export function apply(ctx: Context): void {
       const first = answers[0]
       const selected = first?.selected ?? []
       const custom = first?.custom !== undefined && first.custom.trim() !== '' ? first.custom.trim() : undefined
-      const dontKnow = selected.includes(DONT_KNOW_LABEL)
+      // Task 4.1 (design D5): an empty submission — no option chosen and no
+      // custom text — is a SKIP, not a wrong guess. It rides the dontKnow
+      // channel (same status value, never incorrect) and is flagged with
+      // `skipped: true` so the client and the lesson-log can title it
+      // distinctly; no new status enum value is introduced.
+      const skipped = selected.length === 0 && custom === undefined
+      const dontKnow = skipped || selected.includes(DONT_KNOW_LABEL)
       const byLabel = new Map(displayed.map((option) => [option.label, option.value]))
       let effective = selected.filter((label) => label !== DONT_KNOW_LABEL).map((label) => byLabel.get(label) ?? label)
       let customAnswer: string | undefined
@@ -374,6 +405,7 @@ export function apply(ctx: Context): void {
         correctIndices,
         correct,
         dontKnow,
+        ...(skipped ? { skipped: true } : {}),
         explanation: call.explanation,
         displayedOptions: displayed.map((option) => ({ value: option.value, label: option.label })),
         ...(customAnswer !== undefined ? { customAnswer } : {}),

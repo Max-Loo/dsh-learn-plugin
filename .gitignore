@@ -41,3 +41,6 @@ viz/
 
 # 运行期产物：测试 harness 的 DSH home（storages 会话缓存等）
 .harness-home/
+
+# DSH 运行期产物 harness home(各 harness 可用独立目录名)
+.harness-home*/

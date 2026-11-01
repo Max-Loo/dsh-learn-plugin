@@ -8,16 +8,26 @@
  * link, external-edit preservation (append-only), unlog stopping the mirror,
  * and durable link persistence — plus the harden-lesson-log additions:
  * v1→v2 record migration watermark, write-failure visibility with ordered
- * backfill, and the .md / outside-workspace target constraints.
+ * backfill, and the .md / outside-workspace target constraints — plus the
+ * improve-mirror-robustness additions: link-window staging (no lost events,
+ * no fake restore note), same-file re-link resume (no duplicate backfill),
+ * one-time restore note across simulated restarts (detach + re-enter), the
+ * old-v2-record (no restoredNotedAt) restore compatibility, skipped-quiz
+ * mirroring with no ✗, pre-answer leak-freedom of the log mirror, and the
+ * FIFO bounds of the in-process collections.
  */
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
+// Same-module import as the inserted plugin (`../dist/lib/index.js` →
+// `./log.js`), so the diagnostics symbol object is the exact one the plugin
+// parked on globalThis.
+import { LOG_DIAGNOSTICS_KEY } from '../dist/lib/log.js'
 
 export const name = 'dsh-learn-plugin-log-harness'
-export const inject = ['tools', 'sessions', 'sessionQuery', 'commands']
+export const inject = ['tools', 'sessions', 'sessionQuery', 'commands', 'userQuestions']
 
 const results: { name: string; pass: boolean; detail?: string }[] = []
 function check(name: string, pass: boolean, detail?: string): void {
@@ -57,10 +67,10 @@ function seedV1Record(sessionId: string, file: string): void {
   fs.writeFileSync(unitPath, JSON.stringify(doc, null, 2), 'utf8')
 }
 
-function readStoredRecord(sessionId: string): { file?: string; linkedAt?: string; lastSeq?: number } | undefined {
+function readStoredRecord(sessionId: string): { file?: string; linkedAt?: string; lastSeq?: number; restoredNotedAt?: string } | undefined {
   for (const domainName of ['learn_dsh_lesson_log_v2', 'learn_dsh_lesson_log']) {
     try {
-      const doc = JSON.parse(fs.readFileSync(dshStorageUnitPath(domainName), 'utf8')) as { tables?: { links?: Record<string, { file?: string; linkedAt?: string; lastSeq?: number }> } }
+      const doc = JSON.parse(fs.readFileSync(dshStorageUnitPath(domainName), 'utf8')) as { tables?: { links?: Record<string, { file?: string; linkedAt?: string; lastSeq?: number; restoredNotedAt?: string }> } }
       const record = doc.tables?.links?.[sessionId]
       if (record !== undefined) return record
     } catch {
@@ -68,6 +78,45 @@ function readStoredRecord(sessionId: string): { file?: string; linkedAt?: string
     }
   }
   return undefined
+}
+
+function readUnlinkedRecord(sessionId: string): { file?: string; lastSeq?: number; unlinkedAt?: string } | undefined {
+  try {
+    const doc = JSON.parse(fs.readFileSync(dshStorageUnitPath('learn_dsh_lesson_log_v2'), 'utf8')) as { tables?: { unlinked?: Record<string, { file?: string; lastSeq?: number; unlinkedAt?: string }> } }
+    return doc.tables?.unlinked?.[sessionId]
+  } catch {
+    return undefined
+  }
+}
+
+/** Seed one v2 link record written by the PREVIOUS plugin build: file + linkedAt + lastSeq, but NO restoredNotedAt (task 1.2). */
+function seedV2Record(sessionId: string, file: string, lastSeq: number): void {
+  const unitPath = dshStorageUnitPath('learn_dsh_lesson_log_v2')
+  fs.mkdirSync(path.dirname(unitPath), { recursive: true })
+  let doc: { unit?: { name: string; version: number }; global?: unknown; tables?: { links?: Record<string, unknown>; unlinked?: Record<string, unknown> } }
+  try {
+    doc = JSON.parse(fs.readFileSync(unitPath, 'utf8'))
+  } catch {
+    doc = { unit: { name: 'learn_dsh_lesson_log_v2', version: 2 }, global: null, tables: { links: {}, unlinked: {} } }
+  }
+  doc.unit = { name: 'learn_dsh_lesson_log_v2', version: 2 }
+  doc.tables ??= {}
+  doc.tables.links ??= {}
+  doc.tables.links[sessionId] = { file, linkedAt: new Date().toISOString(), lastSeq }
+  fs.writeFileSync(unitPath, JSON.stringify(doc, null, 2), 'utf8')
+}
+
+function validAssistant(text: string, id: string) {
+  return {
+    turn: 1,
+    step: 1,
+    stream: [],
+    message: { id, role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'probe', model: 'probe-model' } },
+  }
+}
+
+function countMarker(text: string, marker: string): number {
+  return text.split(marker).length - 1
 }
 
 function persistedOnDisk(sessionId: string): boolean {
@@ -110,6 +159,21 @@ export function apply(ctx: Context): void {
   } as never, { surfaceOp: 'append' } as never)
   fs.writeFileSync(v1File, '# Legacy v1 note\n\n> [!quote] YOU\n\nv1-era user line\n', 'utf8')
   seedV1Record(v1SessionId, v1File)
+
+  // Old-v2-record fixture (tasks 1.2/2.3): a session whose link record was
+  // written by the PREVIOUS plugin build — v2 shape with lastSeq but NO
+  // restoredNotedAt — seeded before the plugin opens its storage domain, so
+  // the record is on the medium when the domain loads (same placement as the
+  // v1 fixture). The restore path over this record is exercised in step 14.
+  const noteFile = path.join(tmp, 'note.md')
+  fs.writeFileSync(noteFile, '# Note file\n', 'utf8')
+  const noteSessionId = `harness-note-session-${Date.now()}`
+  const noteSession = ctx.sessions.prepare(noteSessionId as never, { meta: { cwd: tmp } as never } as never)
+  const noteDetach1 = ctx.sessions.enter(noteSession as never) as () => void
+  ctx.sessions.announce(noteSession as never)
+  const nSeq1 = noteSession.append('user/message', validUser('note history line', 'nu-1') as never, { surfaceOp: 'append' } as never).seq
+  const nSeq2 = noteSession.append('assistant/message', validAssistant('note history reply', 'na-1') as never, { surfaceOp: 'append' } as never).seq
+  seedV2Record(noteSessionId, noteFile, nSeq2)
 
   void (async () => {
     if (!(await waitFor('lesson_log tool', () => ctx.tools.get('lesson_log') !== undefined))) return
@@ -263,10 +327,20 @@ export function apply(ctx: Context): void {
 
       // 7. User command path: /lesson-log links and /lesson-unlog stops —
       // the same linkSession implementation behind ctx.commands.execute.
+      // Step 6 unlinked this same file, so this re-link RESUMES from the
+      // watermark moved into the `unlinked` table (task 2.2): no second
+      // backfill, no duplicated blocks.
       const agentStub = { session } as never
       const cmdLink = await ctx.commands.execute(agentStub, `/lesson-log ${logFile}`, [], new AbortController().signal)
       const linkText = JSON.stringify(cmdLink?.result ?? cmdLink)
       check('command /lesson-log links', cmdLink?.result?.kind === 'success' && linkText.includes('Linked'), linkText)
+      const teachCountAfterRelink = countMarker(fs.readFileSync(logFile, 'utf8'), 'Teach me the TCP handshake.')
+      check(
+        're-link same file resumes without duplicate backfill (2.2)',
+        cmdLink?.result?.kind === 'success' && teachCountAfterRelink === 1 && linkText.includes('resumed'),
+        `count=${teachCountAfterRelink} text=${linkText}`,
+      )
+      check('resume record cleared after re-link (2.2)', readUnlinkedRecord(String(sessionId)) === undefined, JSON.stringify(readUnlinkedRecord(String(sessionId))))
       session.append('user/message', {
         id: 'u-4',
         role: 'user',
@@ -392,6 +466,235 @@ export function apply(ctx: Context): void {
       check('watermark advanced after recovery', storedRecovered?.lastSeq === roRecoverySeq, `stored=${JSON.stringify(storedRecovered)} expected=${roRecoverySeq}`)
       off()
       await lessonUnlog?.execute({}, { callId: 'h13' as never, signal: new AbortController().signal, agent: { session: roSession } } as never)
+
+      // ---- improve-mirror-robustness additions ----
+
+      // Dev-harness diagnostics (task 3.1): the plugin exposes its live
+      // collections under a well-known symbol so the bounds can be asserted.
+      const diag = (globalThis as unknown as Record<symbol, unknown>)[LOG_DIAGNOSTICS_KEY] as
+        | { links: Map<string, unknown>; knownUnlinked: Set<string>; askedQuiz: Set<string>; callMeta: Map<string, unknown> }
+        | undefined
+      check('diagnostics exposed', diag !== undefined && typeof diag?.links?.has === 'function')
+
+      // 13. Link-window staging (task 2.1): events arriving while the
+      // backfill read is in flight are staged and released in order behind
+      // it — no loss, no fake "restored" note.
+      const winFile = path.join(tmp, 'window.md')
+      fs.writeFileSync(winFile, '# Window note\n', 'utf8')
+      const winSession = ctx.sessions.create('harness-window-session' as never, { meta: { cwd: tmp } as never })
+      winSession.append('user/message', validUser('window history line', 'wu-1') as never, { surfaceOp: 'append' } as never)
+      winSession.append('assistant/message', validAssistant('window history reply', 'wa-1') as never, { surfaceOp: 'append' } as never)
+      // Fire the link WITHOUT awaiting it, then append live events while the
+      // backfill read is in flight — the placeholder phase must stage them.
+      const winLinkPromise = lessonLog?.execute({ file: winFile }, { callId: 'h14' as never, signal: new AbortController().signal, agent: { session: winSession } } as never)
+      winSession.append('user/message', validUser('window live line', 'wu-2') as never, { surfaceOp: 'append' } as never)
+      winSession.append('assistant/message', validAssistant('window live reply', 'wa-2') as never, { surfaceOp: 'append' } as never)
+      let winLinkErr = ''
+      let winLinkedText = ''
+      try {
+        winLinkedText = String(await winLinkPromise)
+      } catch (error) {
+        winLinkErr = error instanceof Error ? error.message : String(error)
+      }
+      check('window-phase link succeeds', winLinkErr === '' && winLinkedText.includes('Linked'), `${winLinkErr} ${winLinkedText}`)
+      const okWin = await waitFor('window staged release', () => {
+        const text = fs.readFileSync(winFile, 'utf8')
+        return text.includes('window live line') && text.includes('window live reply')
+      })
+      const winText = fs.readFileSync(winFile, 'utf8')
+      const iWHistU = winText.indexOf('window history line')
+      const iWHistA = winText.indexOf('window history reply')
+      const iWLiveU = winText.indexOf('window live line')
+      const iWLiveA = winText.indexOf('window live reply')
+      check(
+        'window events staged then released in order (2.1)',
+        okWin && iWHistU >= 0 && iWHistA > iWHistU && iWLiveU > iWHistA && iWLiveA > iWLiveU,
+        `idx=${iWHistU},${iWHistA},${iWLiveU},${iWLiveA}`,
+      )
+      check('window-phase link writes no restore note (2.1)', !winText.includes('lesson-log restored'), winText.slice(0, 200))
+      await lessonUnlog?.execute({}, { callId: 'h15' as never, signal: new AbortController().signal, agent: { session: winSession } } as never)
+
+      // 14. Old-v2-record restore + one-time restore note (tasks 1.2 / 2.3).
+      // The record was seeded in the OLD v2 shape (no restoredNotedAt) in the
+      // synchronous prelude; its restore fired when the plugin's storage
+      // became ready (the history events above). The session is then
+      // "restarted" twice by detaching it from the store (fires
+      // session/disposed → links cleanup) and re-entering the SAME session
+      // object (seq continues, like a real resume).
+      const okRestore1 = await waitFor('first restore note', () => countMarker(fs.readFileSync(noteFile, 'utf8'), 'lesson-log restored') >= 1)
+      const noteText1 = fs.readFileSync(noteFile, 'utf8')
+      check(
+        'old v2 record (no restoredNotedAt) restores — note once, no history re-mirror (1.2)',
+        okRestore1 && countMarker(noteText1, 'lesson-log restored') === 1 && countMarker(noteText1, 'note history line') === 0,
+        `notes=${countMarker(noteText1, 'lesson-log restored')} hist=${countMarker(noteText1, 'note history line')}`,
+      )
+      check('restoredNotedAt persisted after the note lands (2.3)', readStoredRecord(noteSessionId)?.restoredNotedAt !== undefined, JSON.stringify(readStoredRecord(noteSessionId)))
+      check('watermark kept from the old record (1.2)', readStoredRecord(noteSessionId)?.lastSeq === nSeq2, `stored=${JSON.stringify(readStoredRecord(noteSessionId))} expected=${nSeq2}`)
+      // — restart #2: detach (session/disposed → links cleanup), re-enter.
+      noteDetach1()
+      const okDisposed = await waitFor('links cleanup on dispose (1.1)', () => diag?.links.has(noteSessionId) === false, 30)
+      check('links entry dropped on session dispose (1.1/3.1)', okDisposed === true && diag?.links.has(noteSessionId) === false)
+      const noteDetach2 = ctx.sessions.enter(noteSession as never) as () => void
+      ctx.sessions.announce(noteSession as never)
+      noteSession.append('user/message', validUser('note after first restart', 'nu-2') as never, { surfaceOp: 'append' } as never)
+      const okRestore2 = await waitFor('second restore mirror', () => fs.readFileSync(noteFile, 'utf8').includes('note after first restart'))
+      const noteText2 = fs.readFileSync(noteFile, 'utf8')
+      check('second restart resumes mirroring', okRestore2)
+      check(
+        'second restart adds NO second note (2.3)',
+        countMarker(noteText2, 'lesson-log restored') === 1 && countMarker(noteText2, 'note history line') === 0,
+        `notes=${countMarker(noteText2, 'lesson-log restored')} hist=${countMarker(noteText2, 'note history line')}`,
+      )
+      // — restart #3: same drill, the note stays at exactly one.
+      noteDetach2()
+      await waitFor('links cleanup on second dispose', () => diag?.links.has(noteSessionId) === false, 30)
+      const noteDetach3 = ctx.sessions.enter(noteSession as never) as () => void
+      ctx.sessions.announce(noteSession as never)
+      noteSession.append('user/message', validUser('note after second restart', 'nu-3') as never, { surfaceOp: 'append' } as never)
+      const okRestore3 = await waitFor('third restore mirror', () => fs.readFileSync(noteFile, 'utf8').includes('note after second restart'))
+      const noteText3 = fs.readFileSync(noteFile, 'utf8')
+      check('third restart mirrors new content', okRestore3)
+      check(
+        'third restart still keeps the note at exactly one (2.3)',
+        countMarker(noteText3, 'lesson-log restored') === 1 && countMarker(noteText3, 'note history line') === 0,
+        `notes=${countMarker(noteText3, 'lesson-log restored')} hist=${countMarker(noteText3, 'note history line')}`,
+      )
+
+      // 15. Skipped quiz (task 4.1) + pre-answer leak freedom (task 4.2):
+      // run a quiz through the real tool with an auto-answerer that submits
+      // NOTHING, and assert the skip signal, the mirrored verdict block, and
+      // that the pending-state mirror/request carry no answer.
+      // Without a live agent registry entry the ask must NOT carry an agent
+      // (the host rejects unknown agents), so the quiz executes agent-less and
+      // its sessionId is 'unknown'. To give the mirror a target, a session
+      // with exactly that id is created and linked to a dedicated file.
+      const quizMirrorId = 'unknown'
+      const quizMirrorFile = path.join(tmp, 'quiz-mirror.md')
+      fs.writeFileSync(quizMirrorFile, '# Quiz mirror\n', 'utf8')
+      const quizMirrorSession = ctx.sessions.create(quizMirrorId as never, { meta: { cwd: tmp } as never })
+      const quizMirrorLinked = await lessonLog?.execute({ file: quizMirrorFile }, { callId: 'h15b' as never, signal: new AbortController().signal, agent: { session: quizMirrorSession } } as never)
+      check('quiz mirror session linked', typeof quizMirrorLinked === 'string' && String(quizMirrorLinked).includes('Linked'), String(quizMirrorLinked))
+      const quizCallId = 'harness-skip-quiz'
+      const quizArgs = {
+        question: 'Which packet opens a TCP connection?',
+        options: [
+          { value: 'syn', label: 'SYN' },
+          { value: 'ack', label: 'ACK' },
+        ],
+        correctAnswer: 'syn',
+        explanation: 'SYN sends the very first packet.',
+      }
+      let quizRequestJson = ''
+      let mirrorAtPending = ''
+      let sawQuizRequest = false
+      const answererOff = ctx.on('user-questions/request', (request: unknown, next: () => Promise<unknown>) => {
+        const req = request as { questions?: Array<{ id?: unknown }> }
+        if (Array.isArray(req?.questions) && (req.questions[0] as { id?: unknown } | undefined)?.id === 'quiz') {
+          if (sawQuizRequest) return next()
+          sawQuizRequest = true
+          // Pending state: give the asked-hook pre-write time to land, then
+          // snapshot the pending mirror + the request the user sees.
+          return new Promise((resolve) => {
+            setTimeout(() => {
+              try {
+                quizRequestJson = JSON.stringify(request)
+                mirrorAtPending = fs.readFileSync(quizMirrorFile, 'utf8')
+              } catch {
+                // keep the previous snapshots on read failure
+              }
+              resolve({ answers: [{ id: 'quiz', selected: [] }] })
+            }, 500)
+          })
+        }
+        return next()
+      })
+      // The quiz call must exist in the session log so the verdict mirrors.
+      // tool/call is not surface-eligible — appended without surfaceOp, like
+      // the backfill fixture in step 3.
+      const qCallSeq = quizMirrorSession.append('tool/call', { turn: 2, step: 1, callId: quizCallId, name: 'quiz', arguments: JSON.stringify(quizArgs) } as never).seq
+      const quizTool = ctx.tools.get('quiz')
+      let r15: Record<string, unknown> | undefined
+      let quizErr15 = ''
+      try {
+        // No agent: the ask then runs over the global answerer waterfall.
+        r15 = await quizTool?.execute(quizArgs, { callId: quizCallId as never, signal: new AbortController().signal } as never) as Record<string, unknown>
+      } catch (error) {
+        quizErr15 = error instanceof Error ? error.message : String(error)
+      }
+      answererOff()
+      check('skip quiz executed (empty submission)', quizErr15 === '' && r15 !== undefined, quizErr15)
+      check('skip returns dontKnow signal with skipped flag (4.1)', r15?.status === 'dontKnow' && r15?.dontKnow === true && r15?.skipped === true && r15?.correct === false, JSON.stringify(r15))
+      const feedback15 = (quizTool?.output?.render as ((_args: unknown, value: unknown) => Array<{ text?: string }> | undefined) | undefined)?.(undefined, r15)?.[0]?.text ?? ''
+      check(
+        'skip feedback has no ✗ and reveals the answer (4.1)',
+        !feedback15.includes('✗') && feedback15.includes('Correct answer: syn') && feedback15.includes('SYN sends the very first packet.'),
+        feedback15,
+      )
+      check('skip feedback notes skipped (4.1)', feedback15.includes('Skipped') && feedback15.includes('no answer'), feedback15)
+      // Mirror the persisted tool/result (the agent loop would do this on the
+      // real surface) and assert the verdict block.
+      quizMirrorSession.append('tool/result', {
+        turn: 2,
+        step: 1,
+        message: { id: 'tr-skip', role: 'tool', source: { kind: 'tool', callId: quizCallId }, toolCallId: quizCallId, content: [{ type: 'text', text: feedback15 }], isError: false },
+        meta: r15,
+      } as never, { surfaceOp: 'append', sourceEventSeqs: [qCallSeq] } as never)
+      const okSkipMirror = await waitFor('skipped verdict mirror', () => fs.readFileSync(quizMirrorFile, 'utf8').includes('Quiz — skipped'))
+      const skipText = fs.readFileSync(quizMirrorFile, 'utf8')
+      const skipBlock = skipText.slice(skipText.lastIndexOf('> [!question]'))
+      check(
+        'log verdict block titled Quiz — skipped with no ✗ (4.1)',
+        okSkipMirror && skipBlock.includes('Quiz — skipped') && skipBlock.includes('Your answer: (skipped') && !skipBlock.includes('✗'),
+        skipBlock.slice(0, 200),
+      )
+      check('log skipped block reveals answer + explanation (4.1)', skipBlock.includes('Correct answer: SYN') && skipBlock.includes('SYN sends the very first packet.'), skipBlock.slice(0, 200))
+      check(
+        'pending mirror has 题面 but no answer/explanation (4.2)',
+        mirrorAtPending.includes('Which packet opens a TCP connection?') && !mirrorAtPending.includes('SYN sends the very first packet.'),
+        'pending mirror snapshot missing 题面 or leaked explanation',
+      )
+      check('pending mirror has no verdict block yet (4.2)', mirrorAtPending !== '' && !mirrorAtPending.slice(mirrorAtPending.lastIndexOf('> [!question]')).includes('Correct answer:'))
+      check(
+        'pending ask request leaks nothing (4.2)',
+        quizRequestJson !== '' && !quizRequestJson.includes('SYN sends') && !quizRequestJson.includes('correctAnswer'),
+        quizRequestJson.slice(0, 200),
+      )
+
+      // 16. FIFO bounds (task 3.1): a burst of bash calls on a linked session
+      // fills callMeta without mirroring anything; the cap holds and
+      // mirroring still works. A burst of unlinked sessions fills
+      // knownUnlinked the same way; askedQuiz rides the identical helper.
+      const FIFO_LIMIT = 1024
+      const burst = FIFO_LIMIT + 30
+      const boundFile = path.join(tmp, 'bound.md')
+      fs.writeFileSync(boundFile, '# Bound\n', 'utf8')
+      const boundSession = ctx.sessions.prepare('harness-bound-session' as never, { meta: { cwd: tmp } as never } as never)
+      const boundDetach = ctx.sessions.enter(boundSession as never) as () => void
+      ctx.sessions.announce(boundSession as never)
+      const boundLinked = await lessonLog?.execute({ file: boundFile }, { callId: 'h16' as never, signal: new AbortController().signal, agent: { session: boundSession } } as never)
+      check('bound-stage session linked', typeof boundLinked === 'string' && String(boundLinked).includes('Linked'), String(boundLinked))
+      for (let i = 0; i < burst; i += 1) {
+        boundSession.append('tool/call', { turn: 3, step: i, callId: `burst-${i}`, name: 'bash', arguments: JSON.stringify({ command: 'true' }) } as never)
+      }
+      boundSession.append('user/message', validUser('post-burst mirror line', 'bu-1') as never, { surfaceOp: 'append' } as never)
+      const okPostBurst = await waitFor('post-burst mirror', () => fs.readFileSync(boundFile, 'utf8').includes('post-burst mirror line'), 300)
+      const boundText = fs.readFileSync(boundFile, 'utf8')
+      check('callMeta bounded after burst (3.1)', diag !== undefined && diag.callMeta.size <= FIFO_LIMIT, `size=${diag?.callMeta.size}`)
+      check('mirror still works after FIFO churn (3.1)', okPostBurst && !boundText.includes('burst-0') && boundText.includes('post-burst mirror line'))
+      // knownUnlinked burst: one event per unlinked session is one add each.
+      const kbuStamp = Date.now()
+      for (let i = 0; i < burst; i += 1) {
+        const kbu = ctx.sessions.create(`harness-kbu-${kbuStamp}-${i}` as never, { meta: { cwd: tmp } as never })
+        kbu.append('user/message', validUser('kbu probe', `kbu-${i}`) as never, { surfaceOp: 'append' } as never)
+      }
+      const okKbu = await waitFor('knownUnlinked burst drained', () => diag !== undefined && diag.knownUnlinked.size >= FIFO_LIMIT, 600)
+      check('knownUnlinked bounded (3.1)', okKbu && diag !== undefined && diag.knownUnlinked.size <= FIFO_LIMIT, `size=${diag?.knownUnlinked.size}`)
+      check('askedQuiz bounded (3.1)', diag !== undefined && diag.askedQuiz.size <= FIFO_LIMIT, `size=${diag?.askedQuiz.size}`)
+      // links bound: dispose the linked session — its entry must go.
+      boundDetach()
+      const okBoundDisposed = await waitFor('bound links cleanup', () => diag?.links.has('harness-bound-session') === false, 30)
+      check('links shrink on dispose — end-event path chosen (1.1)', okBoundDisposed && diag !== undefined && diag.links.size < 8, `size=${diag?.links.size}`)
+      await lessonUnlog?.execute({}, { callId: 'h17' as never, signal: new AbortController().signal, agent: { session: boundSession } } as never)
     } catch (error) {
       check('log harness completed without unexpected throw', false, error instanceof Error ? `${error.message}\n${error.stack?.split('\n')[1] ?? ''}` : String(error))
     } finally {

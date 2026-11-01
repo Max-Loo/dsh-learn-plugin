@@ -41,12 +41,14 @@ dsh web --patch ./cordis.dev.yml
 本仓库保留了三组可重复运行的开发验证（不随插件发布）：
 
 ```sh
-# quiz 行为（校验、乱序、IDK、多选、防泄漏、子代理拒绝）：应 22/22 PASS
+# quiz 行为（校验、乱序、IDK、跳过通道、多选、防泄漏卡片与 asked 事件、子代理拒绝）：应 31/31 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./test/quiz-harness.cordis.yml --no-open --port 0
 
 # lesson-log 行为（回填、保序、题面先于答案、命令路径、解除、外部编辑保留、
 # v1→v2 记录迁移水位、只读失败可见与按序补齐、非 .md 拒绝、越界需确认、
-# 命令外链）：应 32/32 PASS
+# 命令外链、链接窗口暂存放行、重链同文件水位续传、旧 v2 记录恢复 + 恢复注记
+# 一次性（模拟重启三轮）、跳过判定块镜像、作答前镜像无泄漏、四集合 FIFO 有界、
+# session/disposed 清理）：应 62/62 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./test/log-harness.cordis.yml --no-open --port 0
 
 # 内置技能分发（目录字段、剥 frontmatter 正文、references 资源基址）：应 22/22 PASS
@@ -83,6 +85,17 @@ pnpm run pack       # build 后打包，tgz 输出到 dist/
 - `@deepseek-ai/dsh-storage-domain` 0.2.1-rc.2 **没有自动迁移钩子**（version 不匹配 open 直接 `version-mismatch`），且 `compatibleVersions` 对宿主 json backend 的 `single` layout 整档文件**不生效**（实测严格精确版本）——同域名 v1→v2 升级无法打开旧数据，同域双开也会撞同一个版本戳。
 - 因此 v2 域使用独立域名 `learn_dsh_lesson_log_v2`：启动先开 v2 域，再以精确的 v1 spec 打开旧域 `learn_dsh_lesson_log`，把 v2 缺失的记录搬移过去，然后**关闭但不删除**旧域——旧版插件回滚后照常打开 v1 数据（只丢新水位，行为同升级前）。
 - 搬移的记录不带水位；`linkFor` 恢复链接时发现记录缺 `lastSeq`，经 `sessionQuery.readSession` 取该会话事件最大 seq 回填并 `table.put` 持久化（一次性）。
+
+## v2 域内演进与回滚（improve-mirror-robustness）
+
+在 v2 域 version 2 内演进（不加版本号、无数据迁移），两处新特性对旧记录向后兼容：
+
+- 链接记录新增可选字段 `restoredNotedAt`：恢复注记落地后置位并 `table.put`，同一链接的后续重启不再追加注记。旧记录没有该字段视为"未注记"，首次恢复照常写注记——行为与升级前一致。
+- 新增 `unlinked` 表（`sessionId → {file, lastSeq, unlinkedAt}`）：`/lesson-unlog` 不再只删除链接记录，而是把 `{file, lastSeq}` 搬入该表；重链**同一文件**时跳过全量回填、从该水位续传，重链**不同**文件走正常回填并清掉旧表项。选独立表而非软删除字段：旧版代码不认识该表，回滚后已解链会话不会被误当有效链接恢复（重链退化为全量回填，功能正确）。
+
+回滚总述：v2 域版本号未变，旧版插件直接打开现有 `learn_dsh_lesson_log_v2.json`——不读 `restoredNotedAt`（注记退回每次恢复都写）、不见 `unlinked` 表（续传退化为全量回填），其余行为不变；残留数据每会话仅数十字节。
+
+另外两处镜像健壮性行为（无存储 schema 参与）：链接建立期（占位→回填→放行）实时事件暂存于每链接 staging 队列（上限 256，超限丢最旧并写 warning callout）；进程内簿记集合（`callMeta`/`askedQuiz`/`knownUnlinked`）为 1024 条 FIFO，`links` 在 `session/disposed`（会话离开进程内 store，`@deepseek-ai/dsh-session` 声明的事件面）时清理对应条目。测试侧诊断通道：`globalThis[Symbol.for('dsh-learn-plugin.log.diagnostics')]` 暴露四集合（仅 harness 使用）。
 
 ## 发布到 npm
 

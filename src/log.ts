@@ -34,12 +34,27 @@ const linkRecord = z.object({
   // v2: durable mirror watermark. Optional so v1 records (which lack it) stay
   // valid against this schema; the restore path backfills it (see linkFor).
   lastSeq: z.number().optional(),
+  // Task 2.3 (design D3): set once the one-time restore note has landed, so a
+  // repeat resume appends no second note. Optional — older v2 records without
+  // it simply count as "not noted yet" and keep their pre-field behavior.
+  restoredNotedAt: z.string().optional(),
 })
 
 /** The v1 record shape, for reading the legacy unit during migration. */
 const linkRecordV1 = z.object({
   file: z.string(),
   linkedAt: z.string(),
+})
+
+// Task 2.2 (design D2): a record moved here on unlink keeps {file, lastSeq}
+// so re-linking the SAME file resumes from the watermark instead of re-running
+// the full backfill. A separate table (not a soft-delete flag) means the
+// harden-lesson-log code never sees these rows at all, so a rollback cannot
+// mistake an unlinked session for a live link.
+const unlinkedRecord = z.object({
+  file: z.string(),
+  lastSeq: z.number(),
+  unlinkedAt: z.string(),
 })
 
 // Boundary cast: checking the full spec against defineDomain's zod generics
@@ -70,7 +85,11 @@ const domainSpec = defineDomainUntyped({
   name: 'learn_dsh_lesson_log_v2',
   version: 2,
   global: { schema: z.object({}), initial: {} },
-  tables: { links: domainTable(linkRecord) },
+  // Task 1.2/design Migration Plan: the `unlinked` table and the optional
+  // `restoredNotedAt` field evolve INSIDE the v2 domain (version stays 2) —
+  // no data migration. Old v2 records without the new optional field open
+  // unchanged; the new table simply starts empty in existing units.
+  tables: { links: domainTable(linkRecord), unlinked: domainTable(unlinkedRecord) },
 })
 
 const legacyDomainSpec = defineDomainUntyped({
@@ -112,12 +131,24 @@ function questionCallout(label: string, question: string, options: Array<{ label
 }
 
 function answerCalloutQuiz(meta: QuizSettledEvent): string {
+  const skipped = meta.skipped === true
   const dontKnow = meta.dontKnow === true
   const correct = meta.correct === true
-  const type = dontKnow ? 'question' : correct ? 'success' : 'failure'
-  const title = dontKnow ? 'Quiz — I don’t know' : correct ? 'Quiz — correct ✓' : 'Quiz — incorrect ✗'
+  // Task 4.1 (design D5): a skipped panel (no option chosen, no custom text)
+  // rides the dontKnow channel — never incorrect, no ✗ — and the title says
+  // so, distinguishing it from an explicit "I don't know" answer.
+  const type = skipped || dontKnow ? 'question' : correct ? 'success' : 'failure'
+  const title = skipped
+    ? 'Quiz — skipped'
+    : dontKnow
+      ? 'Quiz — I don’t know'
+      : correct
+        ? 'Quiz — correct ✓'
+        : 'Quiz — incorrect ✗'
   const body: string[] = []
-  if (dontKnow) {
+  if (skipped) {
+    body.push('Your answer: (skipped — no answer given)')
+  } else if (dontKnow) {
     body.push('Your answer: I don’t know')
   } else {
     const selected = new Set(meta.answers)
@@ -278,21 +309,69 @@ interface LinkState {
   pending: PendingWrite[]
   /** Consecutive failed append attempts; cleared on the next success. */
   failures: number
+  /**
+   * Task 2.3 (design D3): timestamp persisted after the one-time restore note
+   * lands; a later resume with it set skips the note entirely.
+   */
+  restoredNotedAt?: string
+  /**
+   * Task 2.1 (design D1): placeholder-phase marker. While true, live events
+   * for this session are staged instead of mirrored, and the restore path
+   * (linkFor) is never entered — the fake-"restored"-note race cannot fire.
+   */
+  linking?: boolean
+  /** Live items captured during the placeholder phase, in arrival order. */
+  staging: StagedItem[]
 }
+
+type StagedItem =
+  | { kind: 'event'; event: EventView }
+  | { kind: 'quizAsked'; callId: string; question: string; displayedOptions: Array<{ value: string; label: string }> }
 
 interface PendingWrite {
   /** Event seq this write is tied to; the watermark advances to it on success. */
   seq: number
   blocks: string[]
+  /** Task 2.3: landing this write completes the one-time restore note. */
+  restoreNote?: boolean
 }
 
 /** Consecutive append failures before the write problem is surfaced (design D2). */
 const FAILURE_THRESHOLD = 3
 
+/**
+ * Task 3.1: dev-harness diagnostics key. The collections themselves are
+ * parked on globalThis under this symbol while the plugin runs (NOT on ctx:
+ * the cordis context is a service proxy and swallows unknown property
+ * writes). Exported so the harness imports the SAME symbol object instead of
+ * relying on cross-realm Symbol.for behavior. Not part of any runtime
+ * behavior.
+ */
+export const LOG_DIAGNOSTICS_KEY = Symbol.for('dsh-learn-plugin.log.diagnostics')
+
+/**
+ * Task 2.1 (design D1 risk bound): staging cap for the link-establishment
+ * window. Backfill reads are local and fast, so in practice this never
+ * fills; if it does, the oldest staged block is dropped and a warning
+ * callout is left in the log.
+ */
+const STAGING_LIMIT = 256
+
+/**
+ * Task 3.1 (design D4): FIFO cap for the mirror's in-process bookkeeping
+ * collections (`callMeta`, `askedQuiz`, `knownUnlinked`). The mirror only
+ * ever needs recent call context — a callId whose verdict already landed
+ * (or whose session is long gone) has no pending block to decide.
+ */
+const FIFO_LIMIT = 1024
+
 /** Per-link retry backoff timers, so a stalled mirror retries without new events. */
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 export function apply(ctx: Context): void {
+  // Task 3.1 (design D4): `links` entries are removed when their session is
+  // disposed (see the 'session/disposed' hook below); the other three
+  // collections are FIFO-capped at FIFO_LIMIT on every insert.
   const links = new Map<string, LinkState>()
   const knownUnlinked = new Set<string>()
   const askedQuiz = new Set<string>()
@@ -303,13 +382,46 @@ export function apply(ctx: Context): void {
   // callMeta fresh).
   const rebuiltSessions = new Set<string>()
 
+  // Task 3.1: FIFO-bounded inserts. Updating an existing key only replaces
+  // the value (Map/Set insertion order is untouched, so "oldest" stays
+  // meaningful); exceeding the cap evicts the oldest member.
+  function boundedAdd(set: Set<string>, value: string): void {
+    if (!set.has(value)) {
+      set.add(value)
+      while (set.size > FIFO_LIMIT) {
+        const oldest = set.values().next().value
+        if (oldest === undefined) return
+        set.delete(oldest)
+      }
+    }
+  }
+  function boundedSetMeta(callId: string, value: { name: string; args: unknown }): void {
+    if (!callMeta.has(callId)) {
+      callMeta.set(callId, value)
+      while (callMeta.size > FIFO_LIMIT) {
+        const oldest = callMeta.keys().next().value
+        if (oldest === undefined) return
+        callMeta.delete(oldest)
+      }
+    } else {
+      callMeta.set(callId, value)
+    }
+  }
+
+  // Task 3.1: dev-harness diagnostics — the same live collections exposed
+  // under the exported well-known symbol so the harness can assert the
+  // bounds. Not part of any runtime behavior.
+  ;(globalThis as unknown as Record<symbol, unknown>)[LOG_DIAGNOSTICS_KEY] = { links, knownUnlinked, askedQuiz, callMeta }
+
   type LinkRecord = z.infer<typeof linkRecord>
+  type UnlinkedRecord = z.infer<typeof unlinkedRecord>
   type LinkRecordV1 = z.infer<typeof linkRecordV1>
   interface OpenedDomain {
-    table(name: string): KvTable<string, LinkRecord>
+    table(name: string): KvTable<string, LinkRecord | UnlinkedRecord>
     close(): Promise<void>
   }
   let table: KvTable<string, LinkRecord> | undefined
+  let unlinkedTable: KvTable<string, UnlinkedRecord> | undefined
   const ready = (async () => {
     try {
       // The boundary cast keeps tsc out of the deep zod-generic inference of
@@ -322,6 +434,7 @@ export function apply(ctx: Context): void {
         void domain.close()
       }, 'dsh-learn-plugin-log: domainClose')
       table = domain.table('links') as KvTable<string, LinkRecord>
+      unlinkedTable = domain.table('unlinked') as KvTable<string, UnlinkedRecord>
     } catch (error) {
       console.error(`dsh-learn-plugin lesson-log: storage domain failed: ${String(error)}`)
       ctx.logger.warn(`dsh-learn-plugin lesson-log: storage domain unavailable (${String(error)}); links will not persist`)
@@ -379,14 +492,20 @@ export function apply(ctx: Context): void {
     await fsp.appendFile(file, prefix + text + '\n', 'utf8')
   }
 
-  // Design D3/D5: after a successful append, persist the watermark at once so
-  // a crash can only ever repeat one block, never silently drop one.
-  async function persistWatermark(sessionId: string, link: LinkState): Promise<void> {
+  // Design D3/D5: after a successful append, persist the record (watermark
+  // and restore-note flag) at once so a crash can only ever repeat one block,
+  // never silently drop one.
+  async function persistLinkRecord(sessionId: string, link: LinkState): Promise<void> {
     if (table === undefined) return
     try {
-      await table.put(sessionId, { file: link.file, linkedAt: link.linkedAt, lastSeq: link.lastSeq })
+      await table.put(sessionId, {
+        file: link.file,
+        linkedAt: link.linkedAt,
+        lastSeq: link.lastSeq,
+        ...(link.restoredNotedAt !== undefined ? { restoredNotedAt: link.restoredNotedAt } : {}),
+      })
     } catch (error) {
-      ctx.logger.warn(`dsh-learn-plugin lesson-log: watermark persist failed for "${link.file}": ${String(error)}`)
+      ctx.logger.warn(`dsh-learn-plugin lesson-log: record persist failed for "${link.file}": ${String(error)}`)
     }
   }
 
@@ -430,7 +549,9 @@ export function apply(ctx: Context): void {
   // Task 2.2: drain a link's pending writes strictly in order. A failed head
   // stops the drain (ordering preserved), counts a failure, reports at the
   // threshold, and schedules a backoff retry; a success clears the flag,
-  // advances the watermark to the write's seq, and persists it.
+  // advances the watermark to the write's seq, and persists it. A write
+  // carrying `restoreNote` additionally flags the record (task 2.3), so the
+  // note is written once per link even across restarts.
   async function flushLink(sessionId: string, link: LinkState): Promise<void> {
     while (link.pending.length > 0) {
       const head = link.pending[0]
@@ -445,10 +566,76 @@ export function apply(ctx: Context): void {
       }
       link.pending.shift()
       link.failures = 0
+      if (head.restoreNote === true && link.restoredNotedAt === undefined) {
+        // Task 2.3 (design D3): the note landed — flag and persist it so
+        // every later resume skips the note.
+        link.restoredNotedAt = new Date().toISOString()
+        await persistLinkRecord(sessionId, link)
+      }
       if (head.seq > link.lastSeq) {
         link.lastSeq = head.seq
-        await persistWatermark(sessionId, link)
+        await persistLinkRecord(sessionId, link)
       }
+    }
+  }
+
+  // Task 2.1 (design D1): capture one live item during the placeholder phase.
+  // The cap drops the OLDEST staged block and leaves a warning callout in the
+  // (already existing) log file — the window is millisecond-scale in practice,
+  // so overflow means something is deeply wrong and the reader should know.
+  async function stageItem(link: LinkState, item: StagedItem): Promise<void> {
+    if (link.staging.length >= STAGING_LIMIT) {
+      const dropped = link.staging.shift()
+      const detail = dropped?.kind === 'event' ? ` (seq ${dropped.event.seq})` : ''
+      try {
+        await appendToFile(link.file, warningCallout(
+          'lesson-log staging overflow',
+          `The link was being established faster than its history could be read; the oldest staged block${detail} was dropped to stay within ${STAGING_LIMIT}.`,
+        ))
+      } catch {
+        // The log file itself is unwritable; the staging queue is no worse off.
+      }
+    }
+    link.staging.push(item)
+  }
+
+  // Task 2.1 (design D1): release the staged window in order after the link
+  // goes live. Snapshot-covered events (seq ≤ backfill watermark) are skipped;
+  // everything else replays through the same live paths. Quiz 题面 items honor
+  // the askedQuiz marker with the same self-healing failure semantics as the
+  // asked hook (a failed pre-write folds the question into the verdict block).
+  async function releaseStaged(sessionId: string, link: LinkState): Promise<void> {
+    const staged = link.staging
+    link.staging = []
+    for (const item of staged) {
+      if (item.kind === 'quizAsked') {
+        if (askedQuiz.has(item.callId)) continue
+        try {
+          await appendToFile(link.file, questionCallout('Quiz', item.question, item.displayedOptions))
+        } catch (error) {
+          ctx.logger.warn(`dsh-learn-plugin lesson-log: staged quiz pre-write failed (will be folded into the verdict block): ${String(error)}`)
+          continue
+        }
+        boundedAdd(askedQuiz, item.callId)
+        continue
+      }
+      const event = item.event
+      if (event.seq <= link.lastSeq) continue
+      const blocks = blocksForEvent(event, 'live')
+      if (blocks.length === 0) {
+        // Contentless events advance the in-memory boundary only (same rule
+        // as the steady-state live path; a quiz call's watermark is persisted
+        // because a restart must not re-ask its question).
+        if (event.seq > link.lastSeq) {
+          link.lastSeq = event.seq
+          if (event.type === 'tool/call' && asToolCall(event.data)?.name === 'quiz') {
+            await persistLinkRecord(sessionId, link)
+          }
+        }
+        continue
+      }
+      link.pending.push({ seq: event.seq, blocks })
+      await flushLink(sessionId, link)
     }
   }
 
@@ -457,12 +644,22 @@ export function apply(ctx: Context): void {
     if (table === undefined || knownUnlinked.has(sessionId)) return undefined
     const record = table.get(sessionId)
     if (record === undefined) {
-      knownUnlinked.add(sessionId)
+      boundedAdd(knownUnlinked, sessionId)
       return undefined
     }
     // Restore the link for a resumed session before mirroring continues
     // (design D5: the durable watermark is the ONLY replay boundary).
-    const state: LinkState = { file: record.file, linkedAt: record.linkedAt, lastSeq: 0, pending: [], failures: 0 }
+    // restoredNotedAt is copied onto the state so later record persists keep
+    // the flag (dropping it would re-arm the note on the NEXT restart).
+    const state: LinkState = {
+      file: record.file,
+      linkedAt: record.linkedAt,
+      lastSeq: 0,
+      pending: [],
+      failures: 0,
+      staging: [],
+      ...(record.restoredNotedAt !== undefined ? { restoredNotedAt: record.restoredNotedAt } : {}),
+    }
     links.set(sessionId, state)
     knownUnlinked.delete(sessionId)
     if (record.lastSeq === undefined) {
@@ -483,7 +680,7 @@ export function apply(ctx: Context): void {
       } catch (error) {
         ctx.logger.warn(`dsh-learn-plugin lesson-log: v1 migration read failed for ${sessionId} (watermark stays 0): ${String(error)}`)
       }
-      await persistWatermark(sessionId, state)
+      await persistLinkRecord(sessionId, state)
       rebuiltSessions.add(sessionId)
     } else {
       // v2 record: the durable watermark is trusted as-is; the one-shot
@@ -492,9 +689,13 @@ export function apply(ctx: Context): void {
       // and may need it for a cross-restart verdict.
       state.lastSeq = record.lastSeq
     }
-    // The restore note rides the same pending queue: no special error path,
-    // no watermark movement (seq 0), reported like any other stalled write.
-    state.pending.push({ seq: 0, blocks: [restoreNoteBlock(record.file)] })
+    // Task 2.3 (design D3): the restore note rides the same pending queue and
+    // is written ONCE per link — only when the record does not carry
+    // restoredNotedAt yet. Once the note lands, flushLink flags the record and
+    // persists it; every later resume skips straight to mirroring.
+    if (record.restoredNotedAt === undefined) {
+      state.pending.push({ seq: 0, blocks: [restoreNoteBlock(record.file)], restoreNote: true })
+    }
     await flushLink(sessionId, state)
     return state
   }
@@ -509,8 +710,8 @@ export function apply(ctx: Context): void {
       if (event.type !== 'tool/call') continue
       const call = asToolCall(event.data)
       if (call === undefined) continue
-      if (!callMeta.has(call.callId)) callMeta.set(call.callId, { name: call.name, args: call.arguments })
-      if (call.name === 'quiz') askedQuiz.add(call.callId)
+      if (!callMeta.has(call.callId)) boundedSetMeta(call.callId, { name: call.name, args: call.arguments })
+      if (call.name === 'quiz') boundedAdd(askedQuiz, call.callId)
     }
   }
 
@@ -569,7 +770,7 @@ export function apply(ctx: Context): void {
     if (event.type === 'tool/call') {
       const call = asToolCall(event.data)
       if (call === undefined) return []
-      callMeta.set(call.callId, { name: call.name, args: call.arguments })
+      boundedSetMeta(call.callId, { name: call.name, args: call.arguments })
       // ask_user_question never shuffles: its args are the true display
       // order, safe to write live before the answer. quiz 题面 comes from
       // the quiz module's asked event instead (args carry the answer).
@@ -583,7 +784,7 @@ export function apply(ctx: Context): void {
       if (call === undefined || !QA_TOOLS.has(call.name)) return []
       if (call.name === 'quiz') {
         if (result.isError === true) {
-          askedQuiz.add(result.callId)
+          boundedAdd(askedQuiz, result.callId)
           return [warningCallout('Quiz — not asked', textOfContent(result.content).join('\n') || 'quiz call failed')]
         }
         const meta = result.meta as QuizSettledEvent | undefined
@@ -595,7 +796,7 @@ export function apply(ctx: Context): void {
         if (source === 'replay' || !askedQuiz.has(result.callId)) {
           blocks.push(questionCallout('Quiz', meta.question, meta.displayedOptions))
         }
-        askedQuiz.add(result.callId)
+        boundedAdd(askedQuiz, result.callId)
         blocks.push(answerCalloutQuiz(meta))
         return blocks
       }
@@ -621,6 +822,16 @@ export function apply(ctx: Context): void {
     const typed: EventView = { seq: view.seq, type: view.type, data: view.data }
     void withLock(async () => {
       await ready
+      // Task 2.1 (design D1): while a link is being established (placeholder
+      // phase), live events are staged instead of mirrored — and `linkFor` is
+      // NOT consulted, so the restore path (note + watermark backfill) cannot
+      // fire mid-link. The fake-"restored"-note race is gone with it. Staged
+      // items are released in order once the link goes live.
+      const placeholder = links.get(session.id)
+      if (placeholder?.linking === true) {
+        await stageItem(placeholder, { kind: 'event', event: typed })
+        return
+      }
       const link = await linkFor(session.id)
       if (link === undefined) return
       // Task 3.1 (design D5): the durable watermark is the only boundary —
@@ -646,7 +857,7 @@ export function apply(ctx: Context): void {
         if (typed.seq > link.lastSeq) {
           link.lastSeq = typed.seq
           if (typed.type === 'tool/call' && asToolCall(typed.data)?.name === 'quiz') {
-            await persistWatermark(session.id, link)
+            await persistLinkRecord(session.id, link)
           }
         }
         return
@@ -657,15 +868,49 @@ export function apply(ctx: Context): void {
     })
   })
 
+  // Task 1.1 — session-lifecycle audit (design D4), settled against the
+  // `@deepseek-ai/dsh-session` 0.2.1-rc.2 type declarations (node_modules,
+  // lib/types/index.d.ts): the cordis Events map declares
+  //   'session/disposed' — "emitted once when an announced session leaves
+  //   the store, including publication rollback".
+  // The end-event path IS available, so `links` cleanup subscribes to it:
+  // when a session leaves the in-process store, its link state (pending
+  // writes, staging queue, retry timer) is dropped with it. The durable
+  // record stays — a later resume of the same session rebuilds the link
+  // through linkFor from the persisted table. No LRU fallback is needed.
+  ctx.on('session/disposed', (session: { id?: unknown }) => {
+    const id = typeof (session as { id?: unknown } | undefined)?.id === 'string'
+      ? (session as { id: string }).id
+      : undefined
+    if (id === undefined) return
+    links.delete(id)
+    const timer = retryTimers.get(id)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      retryTimers.delete(id)
+    }
+  })
+
   // Quiz questions carry the post-shuffle display order and no answer —
   // written through this hook the moment the question goes out, before the
   // user answers. The askedQuiz marker is set only after the write lands: if
   // it fails, the graded result later writes question+verdict together, so
-  // the log self-heals instead of leaving a dangling verdict.
+  // the log self-heals instead of leaving a dangling verdict. During the
+  // placeholder phase the 题面 is staged and released in window order.
   onQuizEvent((quizEvent) => {
     if (quizEvent.phase !== 'asked') return
     void withLock(async () => {
       await ready
+      const placeholder = links.get(quizEvent.sessionId)
+      if (placeholder?.linking === true) {
+        await stageItem(placeholder, {
+          kind: 'quizAsked',
+          callId: quizEvent.callId,
+          question: quizEvent.question,
+          displayedOptions: quizEvent.displayedOptions,
+        })
+        return
+      }
       const link = await linkFor(quizEvent.sessionId)
       if (link === undefined) return
       if (askedQuiz.has(quizEvent.callId)) return
@@ -675,7 +920,7 @@ export function apply(ctx: Context): void {
         ctx.logger.warn(`dsh-learn-plugin lesson-log: quiz question pre-write failed (will be folded into the verdict block): ${String(error)}`)
         return
       }
-      askedQuiz.add(quizEvent.callId)
+      boundedAdd(askedQuiz, quizEvent.callId)
     })
   })
 
@@ -743,48 +988,116 @@ export function apply(ctx: Context): void {
       await confirmOutsideWorkspace(resolved, base, options)
     }
 
-    // Backfill the session history through the query channel.
+    // Task 2.2 (design D2): re-link resume — a record moved into `unlinked`
+    // for the SAME file lets this link skip the full backfill and continue
+    // from the kept watermark.
+    const resumeRecord = unlinkedTable?.get(session.id)
+    const resume = resumeRecord !== undefined && resumeRecord.file === resolved
+
+    // Task 2.1 (design D1) — phase 1: PLACEHOLDER. The link state goes in
+    // immediately with `linking: true`, so any live event arriving during the
+    // backfill is staged (never dropped, never run through the restore path).
+    // The fake-"restored"-note race (a live event triggering linkFor between
+    // the backfill read and the links.set) is gone with this ordering.
+    const state: LinkState = {
+      file: resolved,
+      linkedAt: new Date().toISOString(),
+      lastSeq: 0,
+      pending: [],
+      failures: 0,
+      linking: true,
+      staging: [],
+    }
+    links.set(session.id, state)
+    knownUnlinked.delete(session.id)
+
+    // Task 2.1 — phase 2: BACKFILL. A resume skips the full backfill and
+    // adopts the kept watermark; otherwise the session history is read and
+    // mirrored through the query channel. A failed read keeps the previous
+    // semantics: warn, link still goes live, staged events still flush.
     let backfilled = 0
     let lastSeq = 0
     const blocks: string[] = []
-    try {
-      const log = await ctx.sessionQuery.readSession(session.id as Parameters<typeof ctx.sessionQuery.readSession>[0])
-      for (const event of log.events) {
-        const block = blocksForEvent(event as EventView, 'replay')
-        if (block.length > 0) backfilled += 1
-        blocks.push(...block)
-        lastSeq = Math.max(lastSeq, (event as { seq?: unknown }).seq === undefined ? 0 : (event as { seq: number }).seq)
+    if (resume && resumeRecord !== undefined) {
+      lastSeq = resumeRecord.lastSeq
+    } else {
+      try {
+        const log = await ctx.sessionQuery.readSession(session.id as Parameters<typeof ctx.sessionQuery.readSession>[0])
+        for (const event of log.events) {
+          const block = blocksForEvent(event as EventView, 'replay')
+          if (block.length > 0) backfilled += 1
+          blocks.push(...block)
+          lastSeq = Math.max(lastSeq, (event as { seq?: unknown }).seq === undefined ? 0 : (event as { seq: number }).seq)
+        }
+      } catch (error) {
+        ctx.logger.warn(`dsh-learn-plugin lesson-log: backfill read failed: ${String(error)}`)
       }
-    } catch (error) {
-      ctx.logger.warn(`dsh-learn-plugin lesson-log: backfill read failed: ${String(error)}`)
     }
-    const state: LinkState = { file: resolved, linkedAt: new Date().toISOString(), lastSeq, pending: [], failures: 0 }
+
+    // The session may have been unlinked while the backfill read was in
+    // flight; the unlink wins and this link is abandoned.
+    if (links.get(session.id) !== state) {
+      throw new Error('Not linked: the session was unlinked while the link was being established')
+    }
+
+    // Task 2.1 — phase 3: GO LIVE. Upgrade the placeholder to the full state
+    // (watermark in), persist the record, retire the resume record, then
+    // release the staged window in order behind the backfill blocks.
+    state.linking = false
+    state.lastSeq = lastSeq
+    await table.put(session.id, { file: resolved, linkedAt: state.linkedAt, lastSeq })
+    if (unlinkedTable !== undefined && resumeRecord !== undefined) {
+      try {
+        await unlinkedTable.delete(session.id)
+      } catch (error) {
+        // A leftover resume row is harmless (数十 bytes; the next unlink
+        // overwrites it), so delete failures never fail the link.
+        ctx.logger.warn(`dsh-learn-plugin lesson-log: resume record cleanup failed: ${String(error)}`)
+      }
+    }
     // Task 2.2: backfill content rides the pending queue too — a failed
     // append is retried and reported like live mirroring, never dropped.
     if (blocks.length > 0) state.pending.push({ seq: lastSeq, blocks })
-    await table.put(session.id, { file: resolved, linkedAt: state.linkedAt, lastSeq })
-    links.set(session.id, state)
-    knownUnlinked.delete(session.id)
     // The replay above already rebuilt this session's call context.
     rebuiltSessions.add(session.id)
+    await releaseStaged(session.id, state)
     await flushLink(session.id, state)
-    return `Linked: ${resolved} (${backfilled} entries backfilled)`
+    return resume
+      ? `Linked: ${resolved} (resumed from the previous mirror watermark — no backfill needed)`
+      : `Linked: ${resolved} (${backfilled} entries backfilled)`
   }
 
   async function unlinkSession(session: { id: string } | undefined): Promise<string> {
     if (session === undefined) throw new Error('lesson_unlog requires a live session')
     await ready
     const link = links.get(session.id)
+    const record = table?.get(session.id)
+    // Task 2.2 (design D2): the watermark outlives the unlink — {file,
+    // lastSeq} moves into the `unlinked` table so re-linking the same file
+    // resumes instead of re-backfilling, while the active-links record is
+    // deleted so an older plugin version cannot restore this session as
+    // linked. The in-memory state is dropped either way; mirroring stops NOW.
+    const file = link?.file ?? record?.file
+    const lastSeq = link?.lastSeq ?? record?.lastSeq
     links.delete(session.id)
-    knownUnlinked.add(session.id)
+    boundedAdd(knownUnlinked, session.id)
     const timer = retryTimers.get(session.id)
     if (timer !== undefined) {
       clearTimeout(timer)
       retryTimers.delete(session.id)
     }
+    if (table !== undefined && unlinkedTable !== undefined && file !== undefined && lastSeq !== undefined) {
+      try {
+        await unlinkedTable.put(session.id, { file, lastSeq, unlinkedAt: new Date().toISOString() })
+      } catch (error) {
+        // Without the resume row a same-file re-link will run a full backfill
+        // — degraded but correct (backfill is idempotent by watermark).
+        ctx.logger.warn(`dsh-learn-plugin lesson-log: unlink resume-record write failed: ${String(error)}`)
+      }
+    }
     if (table !== undefined) await table.delete(session.id)
-    if (link === undefined) return 'No file linked'
-    return `Unlinked: ${path.basename(link.file)}`
+    if (link === undefined && record === undefined) return 'No file linked'
+    return `Unlinked: ${path.basename(file ?? '')}`
   }
 
   ctx.tools.register(defineTool({

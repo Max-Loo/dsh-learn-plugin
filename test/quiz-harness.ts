@@ -4,13 +4,17 @@
  * Loaded through a --patch overlay next to dsh-learn-plugin, it registers a local
  * user-questions waterfall answerer, executes the quiz tool directly with
  * synthetic calls, and prints a PASS/FAIL report to stdout — verifying
- * validation, shuffle, IDK, multi-select set matching, the subagent error
- * path, presentationMeta, and the anti-leak presentCall projection without a
- * human in the loop.
+ * validation, shuffle, IDK, the skipped (empty submission) channel, multi-select
+ * set matching, the subagent error path, presentationMeta, and the anti-leak
+ * presentCall projection and asked event without a human in the loop.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-tools'
+// Same-module import as the inserted plugin (`../dist/lib/index.js` →
+// `./quiz.js`), so the onQuizEvent subscription below observes the SAME
+// listener set the lesson-log mirror uses.
+import { onQuizEvent } from '../dist/lib/quiz.js'
 
 export const name = 'dsh-learn-plugin-quiz-harness'
 export const inject = ['tools', 'userQuestions']
@@ -168,8 +172,59 @@ export function apply(ctx: Context): void {
       }
       check('agent-scoped caller rejected with main-session message', err15.includes('main session'), err15)
 
-      // 16. asked event fires before settle with no answer inside
-      // (verified indirectly: listener list fired during runs without throwing)
+      // 17. skipped: an EMPTY submission — no option chosen, no custom text —
+      // rides the dontKnow channel with skipped:true, never incorrect (task 4.1).
+      const r17 = (await run({ ...baseArgs, correctAnswer: 'mercury' }, { selected: [] })) as Record<string, unknown>
+      check('skip graded dontKnow with skipped flag', r17.status === 'dontKnow' && r17.dontKnow === true && r17.skipped === true && r17.correct === false, JSON.stringify(r17))
+      const feedback17 = (quiz.output?.render as ((_args: unknown, value: unknown) => Array<{ text?: string }> | undefined) | undefined)?.(undefined, r17)?.[0]?.text ?? ''
+      check('skip feedback has no ✗ and reveals answer+explanation', !feedback17.includes('✗') && feedback17.includes('Correct answer: mercury') && feedback17.includes('Explanation: Mercury orbits closest'), feedback17)
+      check('skip feedback says skipped (no answer given)', feedback17.includes('Skipped') && feedback17.includes('no answer'), feedback17)
+      // presentResult is wrapped with args validation — pass full valid args.
+      const fullArgs17 = { ...baseArgs, correctAnswer: 'mercury' }
+      const view17 = quiz.presentResult?.(fullArgs17, { isError: false, meta: r17 }) as { title?: string; content?: { text?: string }[] } | undefined
+      check('skip result card titled Quiz — skipped', view17?.title === 'Quiz — skipped', JSON.stringify(view17) ?? 'undefined view')
+      check('skip card content has no ✗ and reveals answer', view17 !== undefined && !JSON.stringify(view17).includes('✗') && JSON.stringify(view17).includes('Correct answer: mercury'))
+      // skip + custom text is NOT a skip (custom overrides into a real answer).
+      const r17b = (await run({ ...baseArgs, correctAnswer: 'mercury' }, { selected: [], custom: 'the sun, probably' })) as Record<string, unknown>
+      check('custom text is not a skip', r17b.skipped !== true && r17b.status === 'incorrect' && r17b.customAnswer === 'the sun, probably', JSON.stringify(r17b))
+
+      // 18. asked event leaks nothing (task 4.2): the pre-answer event the
+      // lesson-log subscribes to carries question + displayed options only —
+      // no correctAnswer VALUE (lowercase 'mercury'), no explanation text.
+      let askedPayload = ''
+      let askedSeen = false
+      const offAsked = onQuizEvent((event: unknown) => {
+        const view = event as { phase?: unknown }
+        if (view?.phase === 'asked') {
+          askedPayload = JSON.stringify(event)
+          askedSeen = true
+        }
+      })
+      try {
+        await run({ ...baseArgs, correctAnswer: 'mercury' }, { selected: ['Mercury'] })
+      } finally {
+        offAsked()
+      }
+      check(
+        'asked event carries question+options only (4.2)',
+        askedSeen && askedPayload.includes('Which planet') && askedPayload.includes('Mercury'),
+        askedPayload.slice(0, 200),
+      )
+      check(
+        'asked event leaks no answer marking (no correctAnswer/correctIndices/explanation) (4.2)',
+        // displayedOptions legitimately carry every option (value+label — the
+        // user must see the choices); the LEAK criterion is any information
+        // that marks WHICH one is correct.
+        askedSeen && !askedPayload.includes('correctAnswer') && !askedPayload.includes('correctIndices') && !askedPayload.includes('explanation') && !askedPayload.includes('Mercury orbits') && !askedPayload.includes('dontKnow'),
+        askedPayload.slice(0, 200),
+      )
+      // Full pending presentation (card + asked) stays answer-marking-free.
+      const fullPending = JSON.stringify({ card: quiz.presentCall?.(fullArgs17), asked: askedPayload })
+      check(
+        'combined pending presentation leaks no answer marking (4.2)',
+        !fullPending.includes('correctAnswer') && !fullPending.includes('correctIndices') && !fullPending.includes('explanation') && !fullPending.includes('Mercury orbits'),
+        fullPending.slice(0, 200),
+      )
     } catch (error) {
       check('harness completed without unexpected throw', false, error instanceof Error ? error.message : String(error))
     }
