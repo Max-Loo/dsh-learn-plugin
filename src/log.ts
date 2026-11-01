@@ -213,7 +213,7 @@ function cleanUserText(text: string): string {
 function textOfContent(content: unknown): string[] {
   if (!Array.isArray(content)) return []
   return content
-    .filter((block): block is { type: 'string'; text: string } => {
+    .filter((block): block is { type: 'text'; text: string } => {
       if (typeof block !== 'object' || block === null) return false
       const candidate = block as { type?: unknown; text?: unknown }
       return candidate.type === 'text' && typeof candidate.text === 'string'

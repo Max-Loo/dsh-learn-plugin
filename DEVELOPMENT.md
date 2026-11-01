@@ -24,7 +24,7 @@ pnpm run build        # tsc 编译到 dist/lib/
 dsh plugin --profile desktop add link:.
 ```
 
-重启 DSH 后启动日志出现 `[dsh-learn-plugin] plugin loaded` 即成功。link 方式安装的检出保留自己的 `node_modules` / 构建产物，改动源码后需在仓库根重新 `pnpm run build`。
+重启 DSH 后 `teach` / `visualize` 出现在会话技能目录即成功（插件日志统一走 DSH 日志系统：`[dsh-learn-plugin] plugin loaded` 与技能注册消息不再打印到终端 stdout）。link 方式安装的检出保留自己的 `node_modules` / 构建产物，改动源码后需在仓库根重新 `pnpm run build`。
 
 ## 覆盖层（免安装，开发期实时加载）
 
@@ -34,14 +34,14 @@ dsh plugin --profile desktop add link:.
 dsh web --patch ./cordis.dev.yml
 ```
 
-注意 `cordis.dev.yml` 以**绝对路径**插入插件模块——更换检出位置或在其他机器上使用时，需同步替换 yml 中的 `name:` 路径。
+注意 `cordis.dev.yml` 以 **checkout 相对路径**插入插件模块——`./`、`../` 开头的 `name:` 锚定到 patch 文件自身目录（dsh-app-boot 的 `anchorInsertedPluginNames` 语义），更换检出位置、整体移动或更名仓库目录都无需改路径；只有调整 patch 文件与 `dist/lib` 之间的相对位置时才需同步修改 `name:`。
 
 ## 验证方式（harness）
 
 本仓库保留了三组可重复运行的开发验证（不随插件发布）：
 
 ```sh
-# quiz 行为（校验、乱序、IDK、跳过通道、多选、防泄漏卡片与 asked 事件、子代理拒绝）：应 31/31 PASS
+# quiz 行为（校验、乱序、IDK、跳过通道、多选、防泄漏卡片与 asked 事件、子代理拒绝、选项上限）：应 34/34 PASS
 DSH_HOME=<workspace dsh home> dsh web --patch ./test/quiz-harness.cordis.yml --no-open --port 0
 
 # lesson-log 行为（回填、保序、题面先于答案、命令路径、解除、外部编辑保留、
@@ -64,7 +64,7 @@ DSH_HOME=<workspace dsh home> RESTORE_PHASE=B dsh web --patch ./test/restore-pro
 
 端到端教学演练对照 [`openspec/specs/`](openspec/specs/) 各 Scenario 手工执行。
 
-> **注**：以上 overlay（`cordis.dev.yml` 与 `test/*.cordis.yml`）均以**绝对路径**插入插件模块——更换检出位置或在其他机器上复跑时，需把 yml 中的 `name:` 路径同步替换为当前仓库位置（本仓库更名自 `personal/dsh-learn/`，路径曾因此失配过一次）。
+> **注**：以上 overlay（`cordis.dev.yml` 与 `test/*.cordis.yml`）均以 **checkout 相对路径**插入插件模块——`name:` 以 `./` / `../` 开头时锚定到 patch 文件自身目录（`anchorInsertedPluginNames`），更换检出位置、整体移动或更名仓库目录都可原样复跑，无需替换路径；只有改动 patch 文件与 `dist/lib` 的相对位置时才需同步调整（本仓库更名自 `personal/dsh-learn/`，失配发生在绝对路径时代）。
 
 ## 开发工作流
 
@@ -75,6 +75,7 @@ pnpm run pack       # build 后打包，tgz 输出到 dist/
 ```
 
 - 改 `src/` 后重新 `pnpm run build`；link 安装的检出与覆盖层（`--patch ./cordis.dev.yml`）都从 `dist/lib` 加载。
+- **升级 DSH 后先回归再使用**：插件 peer 已放宽为 `0.2.x` 范围（与 `engines.dsh` 一致），DSH 补丁升级不再被 peer 失配硬拦截。因此每次升级 DSH 后、日常使用前，先跑全量验证（见"验证方式"一节）：quiz / log / skills 三组 harness 全 PASS + restore-probe A/B OK，确认 API 契约未漂移后再继续使用。
 - 打包产物 `dist/dsh-learn-plugin-<version>.tgz` 含 `dist/lib/`、`client/`、`skills/`、`cordis.patch.yml` 与 README；`src/`、`test/` 不入包。
 - 行为契约变更走 OpenSpec：改动前先更新 [`openspec/`](openspec/) 下对应 change，归档时合入主 specs。
 
