@@ -16,22 +16,22 @@ importers:
         specifier: ~4.0.5
         version: 4.0.5
       '@deepseek-ai/dsh-commands':
-        specifier: 0.2.1-rc.2
+        specifier: 0.2.x
         version: 0.2.1-rc.2(d643466344aa58c2513b08c98a2b98e5)
       '@deepseek-ai/dsh-session-query':
-        specifier: 0.2.1-rc.2
+        specifier: 0.2.x
         version: 0.2.1-rc.2(786e1e48dc6c33469eac625322c2537e)
       '@deepseek-ai/dsh-skill':
-        specifier: 0.2.1-rc.2
+        specifier: 0.2.x
         version: 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-llm@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-scope@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))
       '@deepseek-ai/dsh-storage-domain':
-        specifier: 0.2.1-rc.2
+        specifier: 0.2.x
         version: 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-storage@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))
       '@deepseek-ai/dsh-tools':
-        specifier: 0.2.1-rc.2
+        specifier: 0.2.x
         version: 0.2.1-rc.2(53871834bb50b7f532ec7289e680bbda)
       '@deepseek-ai/dsh-user-questions':
-        specifier: 0.2.1-rc.2
+        specifier: 0.2.x
         version: 0.2.1-rc.2(9f7d3dbae9b3266aa667f73af8c0cfbf)
       '@types/node':
         specifier: ^24.10.9

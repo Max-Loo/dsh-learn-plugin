@@ -128,5 +128,5 @@ export function apply(ctx: Context): void {
   }
 
   ctx.skills.registerProvider(() => provider)
-  console.log(`[dsh-learn-plugin] bundled skills registered: ${candidates.map((c) => c.name).join(', ')}`)
+  ctx.logger.info(`[dsh-learn-plugin] bundled skills registered: ${candidates.map((c) => c.name).join(', ')}`)
 }

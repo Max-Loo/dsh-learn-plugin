@@ -120,6 +120,9 @@ function normalize(raw: { [key: string]: unknown }): NormalizedCall {
   if (rawOptions.length < 2) {
     throw new ValidationError(`quiz requires at least 2 options (got ${rawOptions.length})`)
   }
+  if (rawOptions.length > 6) {
+    throw new ValidationError(`quiz supports at most 6 options (got ${rawOptions.length})`)
+  }
   const seenValues = new Set<string>()
   const seenLabels = new Set<string>()
   const options = rawOptions.map((item, index) => {

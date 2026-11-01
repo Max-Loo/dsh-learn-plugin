@@ -20,5 +20,5 @@ export function apply(ctx: Context) {
   ctx.plugin(quiz)
   ctx.plugin(log)
   ctx.plugin(skills)
-  console.log('[dsh-learn-plugin] plugin loaded')
+  ctx.logger.info('[dsh-learn-plugin] plugin loaded')
 }

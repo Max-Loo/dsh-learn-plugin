@@ -131,6 +131,27 @@ export function apply(ctx: Context): void {
       }
       check('<2 options rejected', err9.includes('at least 2 options'))
 
+      // >6 options rejected with a clear error before any question goes out
+      let extraRequests = 0
+      ctx.on('user-questions/request', (_request: unknown, next: () => Promise<unknown>) => {
+        extraRequests += 1
+        return next()
+      })
+      const seven = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((v) => ({ value: v, label: v.toUpperCase() }))
+      let errOver = ''
+      try {
+        await run({ ...baseArgs, correctAnswer: 'a', options: seven })
+      } catch (error) {
+        errOver = error instanceof Error ? error.message : String(error)
+      }
+      check('>6 options rejected with at-most message', errOver.includes('at most 6 options (got 7)'), errOver)
+      check('>6 options does not ask the question', extraRequests === 0, `user-questions requests fired: ${extraRequests}`)
+
+      // exactly 6 options still asks and grades normally
+      const six = seven.slice(0, 6)
+      const rMax = (await run({ ...baseArgs, correctAnswer: 'f', options: six }, { selected: ['F'] })) as Record<string, unknown>
+      check('6 options asks and grades normally', rMax.status === 'correct' && Array.isArray(rMax.displayedOptions) && (rMax.displayedOptions as unknown[]).length === 6)
+
       // 10. shuffle:false preserves order; scoring still by value
       const r10 = (await run({ ...baseArgs, correctAnswer: 'mercury', shuffle: false }, { selected: ['Mercury'] })) as Record<string, unknown>
       const d10 = (r10.displayedOptions as { value: string }[]).map((option) => option.value)
