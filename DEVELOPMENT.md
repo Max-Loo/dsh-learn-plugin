@@ -76,6 +76,17 @@ pnpm run pack       # build 后打包，tgz 输出到 dist/
 
 - 改 `src/` 后重新 `pnpm run build`；link 安装的检出与覆盖层（`--patch ./cordis.dev.yml`）都从 `dist/lib` 加载。
 - **升级 DSH 后先回归再使用**：插件 peer 已放宽为 `0.2.x` 范围（与 `engines.dsh` 一致），DSH 补丁升级不再被 peer 失配硬拦截。因此每次升级 DSH 后、日常使用前，先跑全量验证（见"验证方式"一节）：quiz / log / skills 三组 harness 全 PASS + restore-probe A/B OK，确认 API 契约未漂移后再继续使用。
+- **devDeps 精确钉版**：六个 `@deepseek-ai/dsh-*` devDependencies 钉在精确版本（当前 `0.2.1-rc.5`），而非 peerDependencies 那样的 `0.2.x` 裸范围——`dsh-*` 版本线全为 alpha/rc 预发布，semver 裸范围匹配不到预发布版本，任何触发全新解析的路径（删锁、新克隆、pnpm ≥12 供应链策略校验否决旧锁）都会以 `ERR_PNPM_NO_MATCHING_VERSION` 失败。peers 与 `engines.dsh` 的 `0.2.x` 是运行时宽松契约（宿主加载器判定，与 pnpm 解析无关），保持不变。钉版后任一 pnpm 12.x 解析均成功（本机双 pnpm 共存无需清理，建议日常收敛到单一版本减少环境噪音）。
+- **升级 DSH 版本的手法**：先改 specifier 再重锁，不要用 `pnpm update`（它会先按旧 `0.2.x` specifier 重解析，直接撞 `ERR_PNPM_NO_MATCHING_VERSION`）：
+
+  ```sh
+  # 1) package.json：六个 @deepseek-ai/dsh-* devDependencies 的 specifier 改为目标精确版本
+  # 2) 删旧锁重装——@deepseek-ai 传递依赖经 autoInstallPeers 自动全链对齐目标版本
+  rm pnpm-lock.yaml && pnpm install
+  pnpm install     # 幂等确认：应秒级 "Already up to date"
+  pnpm run build
+  # 3) 全量回归（见"验证方式"一节）：quiz/log/skills 三组 harness 全 PASS + restore-probe A/B OK
+  ```
 - 打包产物 `dist/dsh-learn-plugin-<version>.tgz` 含 `dist/lib/`、`client/`、`skills/`、`cordis.patch.yml` 与 README；`src/`、`test/` 不入包。
 - 行为契约变更走 OpenSpec：改动前先更新 [`openspec/`](openspec/) 下对应 change，归档时合入主 specs。
 

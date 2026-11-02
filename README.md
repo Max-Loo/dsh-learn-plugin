@@ -13,7 +13,7 @@
 
 ## 前置条件
 
-- DSH 桌面版（`engines.dsh: "0.2.x"`，在 0.2.1-rc.2 上验证）。
+- DSH 桌面版（`engines.dsh: "0.2.x"`，在 0.2.1-rc.5 上验证）。
 
 > 插件 peerDependencies 允许 `0.2.x` 范围（与 `engines.dsh` 一致）：0.2.x 系列内的补丁运行时可正常安装使用，升级后建议按 [DEVELOPMENT.md](https://github.com/Max-Loo/dsh-learn-plugin/blob/main/DEVELOPMENT.md) 跑一遍验证 harness；仅在更早的 dsh 运行时（0.2 系列之前，如 0.1.x）上会被禁用，需 `dsh plugin allow-version "dsh-learn-plugin@<ver>" --dsh-version <runtime> --accept-risk --profile <profile>` 显式豁免。
 
