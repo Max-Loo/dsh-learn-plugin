@@ -1,6 +1,6 @@
 {
   "name": "dsh-learn-plugin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Graded quiz and lesson-log plugins for DeepSeek Harness",
   "license": "MIT",
   "repository": {
@@ -20,11 +20,13 @@
       "default": "./dist/lib/index.js"
     },
     "./client": "./client/index.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "dist/lib",
     "client",
+    "locale/*.json",
     "skills",
     "cordis.patch.yml",
     "README.md"

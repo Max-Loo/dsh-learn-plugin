@@ -64,6 +64,24 @@ DSH_HOME=<workspace dsh home> RESTORE_PHASE=B dsh web --patch ./test/restore-pro
 
 端到端教学演练对照 [`openspec/specs/`](openspec/specs/) 各 Scenario 手工执行。
 
+### 插件展示元信息校验（零 DSH 依赖）
+
+多语言展示元信息（`locale/` 语言文件 + `package.json` 导出/发布条目，供宿主插件管理页与设置页显示中英文标题与描述）有一组纯静态校验，不需要 DSH 运行时与 harness 环境：
+
+```sh
+# 内容契约 + exports + files 静态校验：应输出 "展示元信息合规" 且退出码 0
+node test/meta-check.mjs
+
+# 违规拦截自测：在临时目录构造 JSON 损坏 / 字段空字符串 / 条目缺失三类副本，
+# 断言均被具名拦截（不触碰真实仓库文件）
+node test/meta-check.mjs --self-test
+
+# 发布产物核对：Tarball Contents 应含 locale/en.json 与 locale/zh.json
+pnpm pack --dry-run
+```
+
+官方在 DSH 宿主仓库提供 `pnpm run verify-package-meta` 校验脚本——它运行在 DSH 源码检出的仓库根，本插件仓库无法直接运行；`test/meta-check.mjs` 即其适用于本包的等价子集（语言文件 JSON 可解析、`meta.title` / `meta.description` 为非空字符串、`exports` 四条目齐备、`files` 含 `locale/*.json`），以官方文档为单一事实源。宿主侧最终人工核对：插件管理页与设置页切换中英文语言，标题与描述应分别取自 `zh.json` / `en.json`。
+
 > **注**：以上 overlay（`cordis.dev.yml` 与 `test/*.cordis.yml`）均以 **checkout 相对路径**插入插件模块——`name:` 以 `./` / `../` 开头时锚定到 patch 文件自身目录（`anchorInsertedPluginNames`），更换检出位置、整体移动或更名仓库目录都可原样复跑，无需替换路径；只有改动 patch 文件与 `dist/lib` 的相对位置时才需同步调整（本仓库更名自 `personal/dsh-learn/`，失配发生在绝对路径时代）。
 
 ## 开发工作流
